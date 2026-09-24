@@ -10,6 +10,7 @@ node_modules
 backend/staticfiles
 backend/backups
 backend/static/app
+backend/legacy_dump.json
 *.zip
 
 # Keep environment-specific secrets and native database backups out of releases.

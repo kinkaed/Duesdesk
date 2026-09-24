@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-Write-Host 'Requires Python 3.12+, Node 22.18+, pnpm, SQL Server and ODBC Driver 18.'
+Write-Host 'Requires Python 3.12+, Node 22.18+, pnpm and PostgreSQL with a DATABASE_URL (local or Neon).'
 if (-not (Test-Path '.venv\Scripts\python.exe')) { python -m venv .venv; if ($LASTEXITCODE -ne 0) { throw 'Python environment creation failed.' } }
 & '.venv\Scripts\python.exe' -m pip install -r backend/requirements.lock
 if ($LASTEXITCODE -ne 0) { throw 'Python dependency installation failed.' }

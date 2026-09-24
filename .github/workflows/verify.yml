@@ -29,3 +29,32 @@ jobs:
         env:
           TEST_SQLITE: '1'
       - run: docker build -t duesdesk:ci .
+
+  postgres-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r backend/requirements.lock
+      - run: pip check
+      - run: python backend/manage.py migrate --noinput
+      - run: python backend/manage.py test ledger
+      - run: python backend/manage.py makemigrations --check --dry-run

@@ -1,4 +1,4 @@
-# Duesdesk — React web app + Django + SQL Server
+# Duesdesk — React web app + Django + PostgreSQL
 
 Your main React source is **work.tsx**. This is a browser application, not React Native.
 
@@ -17,7 +17,7 @@ Your main React source is **work.tsx**. This is a browser application, not React
 
 ## Use on this computer
 
-Run `start.ps1`, then visit **http://127.0.0.1:8765/**. It uses the existing separate SQL Server database **FinancialSecretaryTest**. The original FINANCES database and Access file are not modified.
+Run `start.ps1`, then visit **http://127.0.0.1:8765/**. It uses a local PostgreSQL database (default `duesdesk`). Set `DATABASE_URL` in `backend/.env` to use a hosted database such as Neon instead.
 
 Local sample login: `secretary` / `TryDues25!`. These are test credentials only. Never deploy them or seed sample records in a live database.
 
@@ -25,7 +25,7 @@ After editing React, run `pnpm run build`, then restart `start.ps1` so productio
 
 ## Fresh setup
 
-Install Python 3.12 (available as `python`), Node 22.18 or newer, pnpm 11.19.0, Microsoft ODBC Driver 18 and SQL Server. These tools must be on PATH; verify `python --version`, `node --version` and `pnpm --version` in a new PowerShell window. Create an empty `FinancialSecretaryTest` database with SSMS and grant your Windows account access. Local defaults require no environment file; for a different database, copy `backend/.env.example` to `backend/.env` and adjust it before setup. Run `setup.ps1`. For new local test data only, run `.venv/Scripts/python.exe backend/manage.py seed_demo`.
+Install Python 3.12 (available as `python`), Node 22.18 or newer, pnpm 11.19.0 and PostgreSQL. These tools must be on PATH; verify `python --version`, `node --version` and `pnpm --version` in a new PowerShell window. For a local database, create an empty `duesdesk` database and a `postgres` user with a password; for a hosted database, copy your backend `.env.example` to `backend/.env` and set `DATABASE_URL` (a Neon pooled connection string is recommended) before setup. Run `setup.ps1`. For new local test data only, run `.venv/Scripts/python.exe backend/manage.py seed_demo`.
 
 Optional Vite development server: start the Django server first, then run `pnpm dev` and visit `http://127.0.0.1:5173/static/app/`. Sign in through the proxied `/login/` page, then return to that Vite URL. The default single-server build at port 8765 is the simplest way to use the app.
 
@@ -52,7 +52,7 @@ pnpm test
 $env:TEST_SQLITE='1'
 .venv/Scripts/python.exe backend/manage.py test ledger
 Remove-Item Env:TEST_SQLITE
-# Runs against a temporary SQL Server test database; requires database-creation privileges.
+# Runs against a temporary PostgreSQL test database; requires a DATABASE_URL with create-database rights.
 .venv/Scripts/python.exe backend/manage.py test ledger --noinput
 .venv/Scripts/python.exe backend/manage.py check_finances
 ```

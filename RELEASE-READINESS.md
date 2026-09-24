@@ -5,7 +5,7 @@ Verdict: NOT approved for a public production release yet. Local release checks 
 ## 1. Environment and documentation
 - The delivery folder is not a Git repository. Tested a separate source copy with a new Python virtual environment and new node_modules. No fresh-clone or Git-history claim is possible.
 - Frozen pnpm install, TypeScript/Vite production build, pinned Python install, pip check, empty SQLite migrations, collectstatic and migration drift check passed.
-- Required local prerequisites: Python 3.12 on PATH, Node 22.18+, pnpm 11.19.0, SQL Server, ODBC Driver 18, an existing database and Windows database permissions. This machine uses bundled Python; a normal `python` command was not found on PATH during inspection.
+- Required local prerequisites: Python 3.12 on PATH, Node 22.18+, pnpm 11.19.0, PostgreSQL, an existing database and database permissions. This machine uses bundled Python; a normal `python` command was not found on PATH during inspection.
 - README now explains prerequisites, local env configuration, first secretary creation and source publication exclusions.
 - setup.ps1 now fails if static collection fails instead of announcing success.
 - Missing for production: hosting account, live SQL endpoint/identity, domain/origins, random secret, SMTP configuration. DEPLOYMENT.md enumerates these.

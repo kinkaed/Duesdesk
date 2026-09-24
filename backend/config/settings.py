@@ -2,6 +2,7 @@ import os
 import secrets
 from datetime import timedelta
 from pathlib import Path
+import dj_database_url
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -36,21 +37,13 @@ MIDDLEWARE = ['django.middleware.security.SecurityMiddleware', 'whitenoise.middl
 ROOT_URLCONF = 'config.urls'
 TEMPLATES = [{'BACKEND': 'django.template.backends.django.DjangoTemplates', 'DIRS': [BASE_DIR / 'templates'], 'APP_DIRS': True, 'OPTIONS': {'context_processors': ['django.template.context_processors.request', 'django.contrib.auth.context_processors.auth', 'django.contrib.messages.context_processors.messages', 'ledger.context.site_context']}}]
 WSGI_APPLICATION = 'config.wsgi.application'
-db_host = required('DB_HOST') if PRODUCTION else os.environ.get('DB_HOST', 'localhost')
-db_name = required('DB_NAME') if PRODUCTION else os.environ.get('DB_NAME', 'FinancialSecretaryTest')
-db_auth = os.environ.get('DB_AUTH', 'sql' if PRODUCTION else 'windows')
-extra = 'Encrypt=yes;TrustServerCertificate=' + ('no' if PRODUCTION else 'yes')
-if db_auth == 'managed_identity':
-    extra += ';Authentication=ActiveDirectoryMsi'
-elif PRODUCTION and db_auth != 'sql':
-    raise ImproperlyConfigured('Production DB_AUTH must be sql or managed_identity.')
-DATABASES = {'default': {'ENGINE': 'mssql', 'NAME': db_name, 'HOST': db_host, 'PORT': os.environ.get('DB_PORT', '1433' if PRODUCTION else ''), 'OPTIONS': {'driver': 'ODBC Driver 18 for SQL Server', 'extra_params': extra}, 'CONN_MAX_AGE': 60, 'CONN_HEALTH_CHECKS': True}}
-if db_auth == 'sql':
-    DATABASES['default'].update(USER=required('DB_USER'), PASSWORD=required('DB_PASSWORD'))
 if os.environ.get('TEST_SQLITE') == '1':
     if PRODUCTION:
         raise ImproperlyConfigured('SQLite testing is disabled in production.')
     DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'test.sqlite3'}}
+else:
+    database_url = required('DATABASE_URL') if PRODUCTION else os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/duesdesk')
+    DATABASES = {'default': dj_database_url.parse(database_url, conn_max_age=60, conn_health_checks=True)}
 AUTHENTICATION_BACKENDS = ['axes.backends.AxesStandaloneBackend', 'django.contrib.auth.backends.ModelBackend']
 AXES_FAILURE_LIMIT = 5
 AXES_COOLOFF_TIME = timedelta(minutes=15)
