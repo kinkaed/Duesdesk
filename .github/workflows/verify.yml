@@ -1,0 +1,31 @@
+name: Verify Duesdesk
+on: [push, pull_request]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.19.0'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm test
+      - run: pip install -r backend/requirements.lock
+      - run: pip check
+      - run: python backend/manage.py collectstatic --noinput
+        env:
+          TEST_SQLITE: '1'
+      - run: python backend/manage.py test ledger
+        env:
+          TEST_SQLITE: '1'
+      - run: python backend/manage.py makemigrations --check --dry-run
+        env:
+          TEST_SQLITE: '1'
+      - run: docker build -t duesdesk:ci .

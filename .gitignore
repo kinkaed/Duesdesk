@@ -1,0 +1,19 @@
+node_modules/
+backend/static/app/
+backend/staticfiles/
+backend/.local-secret
+backend/.env
+backend/*.sqlite3
+backend/*.log
+backend/backups/
+**/__pycache__/
+.venv/
+*.log
+
+# Keep environment-specific secrets and native database backups out of releases.
+**/*.env
+**/.env.*
+!**/.env.example
+**/*.bak
+**/*.pfx
+**/*.key
