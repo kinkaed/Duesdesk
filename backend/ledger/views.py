@@ -8,6 +8,7 @@ from decimal import Decimal
 from functools import wraps
 from uuid import uuid5, NAMESPACE_URL
 from django.conf import settings
+from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
@@ -23,6 +24,7 @@ from django.views.decorators.http import require_GET, require_http_methods
 from django.views.decorators.csrf import ensure_csrf_cookie
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
+from .forms import SignupForm
 from .models import Member, Payment, Allocation, DuesMonth, UserAccess, AuditEvent, Organisation, RecoveryAttempt, ImportBatch
 from .access import role_for, visible_members, visible_payments
 from .services import RATE, next_month, parse_month, parse_amount, plan_payment, record_payment, void_payment, audit
@@ -82,6 +84,18 @@ def member_rows(month, user=None):
 
 def payment_json(payment):
     return {'id':payment.pk,'receipt':payment.receipt_number,'member_id':payment.member_id,'member':payment.member_name_snapshot or payment.member.full_name,'amount':str(payment.amount_received),'date':payment.payment_date.isoformat(),'method':payment.method,'reference':payment.reference,'notes':payment.notes,'voided':bool(payment.voided_at),'void_reason':payment.void_reason,'allocations':[{'month':a.dues_month.month.strftime('%B %Y'),'amount':str(a.amount)} for a in payment.allocations.all()]}
+
+@require_http_methods(['GET', 'POST'])
+def signup(request):
+    if request.user.is_authenticated:
+        return redirect(settings.LOGIN_REDIRECT_URL)
+    form = SignupForm(request.POST or None)
+    if request.method == 'POST' and form.is_valid():
+        user = form.save()
+        login(request, user, backend='django.contrib.auth.backends.ModelBackend')
+        return redirect(settings.LOGIN_REDIRECT_URL)
+    return render(request, 'registration/signup.html', {'form': form})
+
 
 @login_required
 def home(request):
