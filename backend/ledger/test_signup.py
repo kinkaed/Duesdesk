@@ -9,10 +9,13 @@ from .models import UserAccess
 class SignupTests(TestCase):
     password = 'A-Very-Strong-Signup-Password!'
 
-    def test_signup_creates_hashed_user_and_logs_in(self):
+    def test_signup_creates_secretary_account_and_logs_in(self):
         page = self.client.get('/signup/')
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, 'csrfmiddlewaretoken')
+        self.assertContains(page, 'Create a secretary account')
+        self.assertContains(page, 'secretary accounts only')
+        self.assertContains(page, 'Register as a Secretary')
 
         response = self.client.post('/signup/', {
             'username': 'new-signup',
@@ -27,7 +30,9 @@ class SignupTests(TestCase):
         self.assertTrue(user.check_password(self.password))
         self.assertNotEqual(user.password, self.password)
         self.assertEqual(self.client.session['_auth_user_id'], str(user.pk))
-        self.assertFalse(UserAccess.objects.filter(user=user).exists())
+        self.assertEqual(user.access.role, 'secretary')
+        self.assertIsNone(user.access.member_id)
+        self.assertEqual(self.client.get('/').status_code, 200)
         self.assertFalse(AccessAttempt.objects.filter(username=user.username).exists())
 
     def test_signup_post_requires_csrf(self):

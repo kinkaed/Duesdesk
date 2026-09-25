@@ -91,7 +91,9 @@ def signup(request):
         return redirect(settings.LOGIN_REDIRECT_URL)
     form = SignupForm(request.POST or None)
     if request.method == 'POST' and form.is_valid():
-        user = form.save()
+        with transaction.atomic():
+            user = form.save()
+            UserAccess.objects.create(user=user, role='secretary')
         login(request, user, backend='django.contrib.auth.backends.ModelBackend')
         return redirect(settings.LOGIN_REDIRECT_URL)
     return render(request, 'registration/signup.html', {'form': form})
