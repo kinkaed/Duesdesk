@@ -16,7 +16,8 @@ RUN pip install --no-cache-dir -r requirements.lock
 COPY backend/ ./
 COPY --from=frontend /app/backend/static/app ./static/app
 # Build collection never connects to a database and never uses production secrets.
-RUN TEST_SQLITE=1 python manage.py collectstatic --noinput \
+RUN TEST_SQLITE=1 python manage.py collectstatic --noinput --verbosity 2 \
+    && TEST_SQLITE=1 python manage.py verify_static \
     && rm -f .local-secret \
     && useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app

@@ -22,6 +22,9 @@ jobs:
       - run: python backend/manage.py collectstatic --noinput
         env:
           TEST_SQLITE: '1'
+      - run: python backend/manage.py verify_static
+        env:
+          TEST_SQLITE: '1'
       - run: python backend/manage.py test ledger
         env:
           TEST_SQLITE: '1'

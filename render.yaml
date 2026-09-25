@@ -3,11 +3,11 @@ services:
     name: duesdesk
     runtime: python
     plan: starter
-    rootDir: backend
+    rootDir: .
     region: frankfurt
     healthCheckPath: /health/
-    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate
-    startCommand: python serve.py
+    buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static && python backend/manage.py migrate --noinput
+    startCommand: cd backend && python serve.py
     envVars:
       - key: APP_ENV
         value: production
