@@ -1,5 +1,8 @@
+from io import StringIO
+
 from axes.models import AccessAttempt
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
 from .models import UserAccess
@@ -45,6 +48,24 @@ class SignupTests(TestCase):
         })
         self.assertEqual(response.status_code, 403)
         self.assertFalse(User.objects.filter(username='new-signup').exists())
+
+    def test_home_explains_missing_access(self):
+        user = User.objects.create_user('legacy-user', password=self.password)
+        self.client.force_login(user)
+
+        response = self.client.get('/')
+
+        self.assertEqual(response.status_code, 403)
+        self.assertContains(response, 'assign your account role', status_code=403)
+
+    def test_assign_access_command_repairs_legacy_user(self):
+        user = User.objects.create_user('legacy-user', password=self.password)
+        output = StringIO()
+
+        call_command('assign_access', user.username, '--role', 'secretary', stdout=output)
+
+        self.assertEqual(UserAccess.objects.get(user=user).role, 'secretary')
+        self.assertIn('Created secretary access', output.getvalue())
 
     def test_signup_rejects_duplicate_email_and_mismatched_password(self):
         User.objects.create_user(username='existing', email='person@example.com', password=self.password)

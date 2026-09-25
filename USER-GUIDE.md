@@ -41,7 +41,7 @@ In **Manage → Import records**, download the template, fill it, and upload a U
 - **Auditor:** reads all records, reports and audit history; cannot change them.
 - **Member:** sees only their linked member record, payments, receipts and reports.
 
-Create accounts in **Manage**, using a unique email and a strong initial password. Share the password privately; ask the recipient to change it. Disabling an account removes access, including existing sessions, while retaining its historical records. To re-enable an account, an operator must use the management shell (`User.objects.filter(username='...').update(is_active=True)`) and record the change operationally; there is no public signup.
+Create accounts in **Manage**, using a unique email and a strong initial password. Secretaries can also register at `/signup/`; that flow always creates a secretary role. Share the password privately; ask the recipient to change it. Disabling an account removes access, including existing sessions, while retaining its historical records. To re-enable an account, an operator must use the management shell (`User.objects.filter(username='...').update(is_active=True)`) and record the change operationally. If an older account is missing its access role, assign it explicitly with `python backend/manage.py assign_access <username> --role secretary`; use `--role member --member-id <id>` for a linked member account.
 
 Use **Change password** while signed in, or **Forgot your password?** on the sign-in page. Five failed login attempts lock that account for 15 minutes. In local mode recovery emails are written to the server log; in production they require the configured SMTP provider.
 

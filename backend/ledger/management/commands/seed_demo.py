@@ -6,7 +6,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.conf import settings
 from django.core.management.base import CommandError
-from ledger.models import Member
+from ledger.models import Member, UserAccess
 from ledger.services import record_payment
 
 class Command(BaseCommand):
@@ -20,6 +20,7 @@ class Command(BaseCommand):
         if created:
             user.set_password('TryDues25!')
             user.save()
+        UserAccess.objects.get_or_create(user=user, defaults={'role': 'secretary'})
         if Member.objects.exists():
             self.stdout.write('Existing members retained; no sample data added.')
             return

@@ -38,7 +38,7 @@ def api(view):
             return JsonResponse({'error': 'Your session ended. Please sign in again.'}, status=401)
         role = role_for(request.user)
         if not role:
-            return JsonResponse({'error': 'Your account does not have access. Contact the secretary.'}, status=403)
+            return JsonResponse({'error': 'Your account has no assigned access. Contact the secretary to assign your account role.'}, status=403)
         if request.method not in ('GET','HEAD') and role != 'secretary':
             return JsonResponse({'error': 'Your account is read-only.'}, status=403)
         try:
@@ -101,7 +101,7 @@ def signup(request):
 
 @login_required
 def home(request):
-    if not role_for(request.user): return HttpResponse('Your account has no assigned access. Contact the secretary.',status=403)
+    if not role_for(request.user): return HttpResponse('Your account has no assigned access. Contact the secretary to assign your account role.',status=403)
     return render(request,'react.html')
 
 @api
