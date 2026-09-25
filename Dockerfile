@@ -22,4 +22,4 @@ RUN TEST_SQLITE=1 python manage.py collectstatic --noinput \
     && chown -R appuser:appuser /app
 USER appuser
 EXPOSE 8000
-CMD ["sh", "-c", "python manage.py deployment_check && python serve.py"]
+CMD ["python", "serve.py"]

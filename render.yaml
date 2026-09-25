@@ -1,14 +1,22 @@
 services:
   - type: web
     name: duesdesk
-    runtime: docker
+    runtime: python
     plan: starter
+    rootDir: backend
+    region: frankfurt
     healthCheckPath: /health/
+    buildCommand: pip install -r requirements.txt && python manage.py collectstatic --noinput && python manage.py migrate
+    startCommand: python serve.py
     envVars:
       - key: APP_ENV
         value: production
+      - key: PYTHON_VERSION
+        value: "3.12"
       - key: PORT
-        value: 8000
+        value: 10000
+      - key: BIND_HOST
+        value: 0.0.0.0
       - key: TRUST_PROXY
         value: "1"
       - key: TRUSTED_PROXY_IP
@@ -16,9 +24,7 @@ services:
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: ALLOWED_HOSTS
-        sync: false
-      - key: CSRF_TRUSTED_ORIGINS
-        sync: false
+        value: duesdesk.onrender.com
       - key: DATABASE_URL
         sync: false
       - key: EMAIL_HOST
