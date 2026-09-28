@@ -57,7 +57,13 @@ Global identity lookups for login, duplicate usernames/emails and password recov
 
 ## Existing data migration and rollout
 
-Migrations 0005 and 0006 add nullable organization fields, assign existing data/users to the default organization (existing ID 1), then require those fields. Existing organization name/contact/footer and user roles are retained. Missing access records are assigned to the default organization; existing migration 0004 already repairs old users. PostgreSQL identity sequences are advanced to avoid a conflict on the next signup.
+Migrations 0005 and 0006 add nullable organization fields, assign existing data/users to the default organization, then require those fields. Existing organization name/contact/footer and user roles are retained. Missing access records are assigned to the default organization; existing migration 0004 already repairs old users. PostgreSQL identity sequences are advanced to avoid a conflict on the next signup.
+
+The backfill adopts the organization that already exists rather than assuming id 1. If a legacy database's organisation row has a different id, the previous assumption created a second generic "Membership Association" and silently re-homed every record to it, stranding the real organization's name, contact and receipt footer. Where several organizations already exist, historical records cannot be attributed and are adopted by the lowest existing id; no organization is dropped or created.
+
+Check the legacy organisation id before migrating: `SELECT id, name FROM ledger_organisation;`. A single row with id 1 is the only case that needs no attention.
+
+On PostgreSQL the backfill also flushes deferred foreign-key checks before the `NOT NULL` change. Creating the missing membership rows queues deferred trigger events, and the following `ALTER TABLE` would otherwise be refused with `cannot ALTER TABLE ... pending trigger events`, aborting the migration. This triggers whenever any account lacks a membership row, so the migration is rehearsed against a copy of production data rather than an empty database.
 
 The migration cannot infer which historical records belonged to different real-world organizations. Existing shared data remains together in the default organization. Splitting historical records requires an explicitly reviewed data mapping; this release does not guess ownership.
 

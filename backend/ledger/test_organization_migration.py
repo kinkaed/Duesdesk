@@ -54,3 +54,35 @@ class OrganizationMigrationTests(TransactionTestCase):
         next_org=Org.objects.create(name='First signup')
         self.assertGreater(next_org.pk,default.pk)
         self.assertNotEqual(next_org.public_id,default.public_id)
+
+    def test_legacy_organization_with_non_default_pk_keeps_its_records(self):
+        org=self.old.get_model('ledger','Organisation').objects.create(pk=7,name='Real Association',contact='Real contact',receipt_footer='Real thanks')
+        user=self.old.get_model('auth','User').objects.create(username='legacy',is_staff=True,password='!')
+        member=self.old.get_model('ledger','Member').objects.create(full_name='Legacy Member',joined=date(2026,1,1))
+        due=self.old.get_model('ledger','DuesMonth').objects.create(month=date(2026,9,1),amount_due=25)
+        payment=self.old.get_model('ledger','Payment').objects.create(member_id=member.pk,amount_received=100,payment_date=date(2026,9,1),method='Cash',request_key=uuid4(),created_by_id=user.pk,member_name_snapshot='Legacy Member')
+        allocation=self.old.get_model('ledger','Allocation').objects.create(payment_id=payment.pk,dues_month_id=due.pk,amount=25)
+        new=self.forward()
+        # Records must stay with the organization they already belonged to.
+        for model,obj in [(new.get_model('ledger','Member'),member),(new.get_model('ledger','Payment'),payment),(new.get_model('ledger','Allocation'),allocation)]:
+            self.assertEqual(model.objects.get(pk=obj.pk).organization_id,org.pk)
+        # No second, generic organization may appear and no branding may be lost.
+        self.assertEqual(new.get_model('ledger','Organisation').objects.count(),1)
+        kept=new.get_model('ledger','Organisation').objects.get(pk=7)
+        self.assertEqual(kept.name,'Real Association')
+        self.assertEqual(kept.contact,'Real contact')
+        self.assertEqual(kept.receipt_footer,'Real thanks')
+        self.assertIsNotNone(kept.public_id)
+        self.assertGreater(new.get_model('ledger','Organisation').objects.create(name='Next organization').pk,7)
+
+    def test_multiple_existing_organizations_are_all_preserved(self):
+        old_org=self.old.get_model('ledger','Organisation').objects.create(pk=3,name='Lowest Association')
+        self.old.get_model('ledger','Organisation').objects.create(pk=9,name='Other Association')
+        self.old.get_model('ledger','Member').objects.create(full_name='Legacy Member',joined=date(2026,1,1))
+        new=self.forward()
+        # Historical records cannot be split between organizations, so they are
+        # adopted by the lowest existing pk; no organization may be dropped.
+        self.assertEqual(new.get_model('ledger','Member').objects.get(full_name='Legacy Member').organization_id,old_org.pk)
+        kept=new.get_model('ledger','Organisation').objects.order_by('pk')
+        self.assertEqual([(o.pk,o.name) for o in kept],[(3,'Lowest Association'),(9,'Other Association')])
+        self.assertTrue(all(o.public_id for o in kept))
