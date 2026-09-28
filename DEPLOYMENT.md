@@ -47,7 +47,10 @@ Run these commands once against the fresh Neon database, with the secret environ
 
 ```text
 python manage.py migrate --noinput
+# Prefer /signup/ for the first secretary and organization.
+# For an operator-created account, assign an existing organization explicitly:
 python manage.py createsuperuser
+python manage.py assign_access USERNAME --role secretary --organization-id ORGANIZATION_ID
 ```
 
 In a shell set the organisation (replace the examples):
@@ -118,3 +121,7 @@ Neon backup guidance: https://neon.tech/docs/manage/backups
 10. Perform and document the restore drill. Assign named people responsibility for access reviews, updates and incidents.
 
 This is a deployable application with tested core controls, not a claim of an independent security audit. Domain, SMTP, cloud networking, Neon roles/backups, and container operation must be verified in the selected hosting account. No hosting bill or public deployment is initiated by the local build.
+
+## Organization migration release
+
+Read **ORGANIZATIONS.md** before deploying migrations 0005/0006. Back up Neon, rehearse on staging and pause writes during migration/cutover; the old application cannot safely serve writes after the required organization columns are added. The existing build/start commands and static manifest backend remain unchanged. Logo images are normalized and stored in PostgreSQL, so no external storage credentials are needed. Run PostgreSQL CI (including concurrent leave/invite tests) before rollout. Use `/signup/` to create a new organization or `assign_access USERNAME --role secretary --organization-id ID` to repair an existing account. `createsuperuser` alone does not grant tenant access.

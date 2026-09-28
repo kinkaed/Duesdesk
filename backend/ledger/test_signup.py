@@ -5,10 +5,10 @@ from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.test import Client, TestCase, override_settings
 
-from .models import UserAccess
+from .models import UserAccess, Organisation
 
 
-@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
 class SignupTests(TestCase):
     password = 'A-Very-Strong-Signup-Password!'
 
@@ -21,6 +21,7 @@ class SignupTests(TestCase):
         self.assertContains(page, 'Register as a Secretary')
 
         response = self.client.post('/signup/', {
+            'organization_name': 'New Organization',
             'username': 'new-signup',
             'email': 'new-signup@example.com',
             'password1': self.password,
@@ -41,6 +42,7 @@ class SignupTests(TestCase):
     def test_signup_post_requires_csrf(self):
         client = Client(enforce_csrf_checks=True)
         response = client.post('/signup/', {
+            'organization_name': 'New Organization',
             'username': 'new-signup',
             'email': 'new-signup@example.com',
             'password1': self.password,
@@ -62,7 +64,8 @@ class SignupTests(TestCase):
         user = User.objects.create_user('legacy-user', password=self.password)
         output = StringIO()
 
-        call_command('assign_access', user.username, '--role', 'secretary', stdout=output)
+        org=Organisation.objects.create(name='Legacy')
+        call_command('assign_access', user.username, '--role', 'secretary', '--organization-id', str(org.pk), stdout=output)
 
         self.assertEqual(UserAccess.objects.get(user=user).role, 'secretary')
         self.assertIn('Created secretary access', output.getvalue())
@@ -71,6 +74,7 @@ class SignupTests(TestCase):
         User.objects.create_user(username='existing', email='person@example.com', password=self.password)
 
         response = self.client.post('/signup/', {
+            'organization_name': 'New Organization',
             'username': 'new-signup',
             'email': 'PERSON@example.com',
             'password1': self.password,
@@ -81,6 +85,7 @@ class SignupTests(TestCase):
         self.assertFalse(User.objects.filter(username='new-signup').exists())
 
         response = self.client.post('/signup/', {
+            'organization_name': 'New Organization',
             'username': 'new-signup',
             'email': 'new-signup@example.com',
             'password1': self.password,

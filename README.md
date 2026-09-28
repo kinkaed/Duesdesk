@@ -37,7 +37,9 @@ Optional Vite development server: start the Django server first, then run `pnpm 
 - Void with a reason; original records remain visible and balances recalculate.
 - Monthly collections, covered dues, monthly balances and cumulative arrears.
 - Secretary, auditor and member roles enforced on the server; members see only their own data.
-- Account creation and disabling, password changes, recovery email and login lockouts.
+- Organization signup, single-use secretary invitations, safe handover/leave, and immediate access revocation.
+- Organization logo upload, extracted editable colors, and contrast-safe dynamic themes.
+- Password changes, recovery email and login lockouts.
 - Reviewed CSV imports for members/payments, duplicate-file prevention and transactional commits.
 - CSV and Excel exports for monthly balances and payment ledgers.
 - Audit history, CSRF protection, security headers, secure production cookies and encrypted SQL connections.
@@ -62,6 +64,8 @@ The app is not an accounting general ledger: it tracks membership contributions,
 
 ## Release verification
 
-This delivered folder is not currently a Git repository. A clean source-copy verification is possible, but a fresh-clone check and committed-secret history check require a repository. Exclude `.venv`, `node_modules`, `.env`, `.local-secret`, logs, databases, backups and generated static assets when publishing source. Production configuration is listed in DEPLOYMENT.md; there are no production credentials supplied.
+Source is maintained in the Duesdesk Git repository. CI builds the frontend and tests against SQLite and PostgreSQL. Exclude `.venv`, `node_modules`, `.env`, `.local-secret`, logs, databases, backups and generated static assets when publishing source. Production configuration is listed in DEPLOYMENT.md; there are no production credentials supplied.
 
-A first non-demo secretary account can be created with `.venv/Scripts/python.exe backend/manage.py createsuperuser`. Do not run `seed_demo` against real data.
+Create the first secretary and organization at `/signup/`. Additional secretaries join through **Manage → Invite Secretary**. An operator-created superuser requires explicit organization access; see **ORGANIZATIONS.md**. Do not run `seed_demo` against real data.
+
+Read **ORGANIZATIONS.md** for the schema, query audit, branding approach, migration rollout and verification results. Back up and pause writes for the organization migration before deploying this change.

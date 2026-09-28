@@ -3,8 +3,36 @@ from django.db import models
 from django.db.models import Q
 from django.core.validators import MinValueValidator
 from decimal import Decimal
+import uuid
+from django.utils import timezone
+from django.core.validators import RegexValidator
+from django.core.exceptions import ValidationError
 
-class Member(models.Model):
+class ScopedModel(models.Model):
+    tenant_relations = ()
+
+    class Meta:
+        abstract = True
+
+    def clean(self):
+        super().clean()
+        if self.pk:
+            existing=type(self).objects.filter(pk=self.pk).values_list('organization_id',flat=True).first()
+            if existing and existing!=self.organization_id:
+                raise ValidationError('Records cannot be moved between organizations.')
+        for field in self.tenant_relations:
+            if getattr(self,field+'_id',None):
+                related=getattr(self,field)
+                if related.organization_id!=self.organization_id:
+                    raise ValidationError('Related records must belong to the same organization.')
+
+    def save(self,*args,**kwargs):
+        self.clean()
+        return super().save(*args,**kwargs)
+
+class Member(ScopedModel):
+    tenant_relations = ()
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
     full_name = models.CharField(max_length=100)
     phone = models.CharField(max_length=30, blank=True)
     email = models.EmailField(blank=True)
@@ -17,14 +45,18 @@ class Member(models.Model):
     def code(self):
         return f'MBR-{self.pk:04d}'
 
-class DuesMonth(models.Model):
-    month = models.DateField(unique=True)
+class DuesMonth(ScopedModel):
+    tenant_relations = ()
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
+    month = models.DateField()
     amount_due = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('25.00'))
 
     class Meta:
-        constraints = [models.CheckConstraint(condition=Q(amount_due__gt=0), name='dues_positive')]
+        constraints = [models.UniqueConstraint(fields=['organization','month'], name='org_dues_month'), models.CheckConstraint(condition=Q(amount_due__gt=0), name='dues_positive')]
 
-class Payment(models.Model):
+class Payment(ScopedModel):
+    tenant_relations = ('member',)
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
     member = models.ForeignKey(Member, on_delete=models.PROTECT, related_name='payments')
     amount_received = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
     payment_date = models.DateField()
@@ -47,7 +79,9 @@ class Payment(models.Model):
     class Meta:
         constraints = [models.CheckConstraint(condition=Q(amount_received__gt=0), name='payment_positive')]
 
-class Allocation(models.Model):
+class Allocation(ScopedModel):
+    tenant_relations = ('payment', 'dues_month')
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
     payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name='allocations')
     dues_month = models.ForeignKey(DuesMonth, on_delete=models.PROTECT)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
@@ -55,17 +89,30 @@ class Allocation(models.Model):
     class Meta:
         constraints = [models.UniqueConstraint(fields=['payment', 'dues_month'], name='unique_payment_month'), models.CheckConstraint(condition=Q(amount__gt=0), name='allocation_positive')]
 
-class UserAccess(models.Model):
+class UserAccess(ScopedModel):
+    tenant_relations = ('member',)
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
+    active = models.BooleanField(default=True)
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='access')
     role = models.CharField(max_length=12, choices=[('secretary','Secretary'), ('auditor','Auditor'), ('member','Member')])
     member = models.OneToOneField(Member, on_delete=models.PROTECT, null=True, blank=True)
 
 class Organisation(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    created_at = models.DateTimeField(default=timezone.now)
+    # Small normalized PNGs live in PostgreSQL, surviving Render restarts.
+    logo = models.BinaryField(blank=True, default=bytes)
+    primary = models.CharField(max_length=7, default='#214f43', validators=[RegexValidator(r'^#[0-9a-fA-F]{6}$')])
+    secondary = models.CharField(max_length=7, default='#edf4e6', validators=[RegexValidator(r'^#[0-9a-fA-F]{6}$')])
+    accent = models.CharField(max_length=7, default='#527735', validators=[RegexValidator(r'^#[0-9a-fA-F]{6}$')])
+
     name = models.CharField(max_length=120, default='Membership Association')
     contact = models.CharField(max_length=200, blank=True)
     receipt_footer = models.CharField(max_length=250, default='Thank you for your contribution.')
 
-class AuditEvent(models.Model):
+class AuditEvent(ScopedModel):
+    tenant_relations = ()
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)
     action = models.CharField(max_length=60)
     entity = models.CharField(max_length=30)
@@ -80,9 +127,27 @@ class RecoveryAttempt(models.Model):
     key = models.CharField(max_length=64, unique=True)
     requested_at = models.DateTimeField()
 
-class ImportBatch(models.Model):
-    digest = models.CharField(max_length=64, unique=True)
+class ImportBatch(ScopedModel):
+    tenant_relations = ()
+    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
+    digest = models.CharField(max_length=64)
     kind = models.CharField(max_length=12)
     row_count = models.PositiveIntegerField()
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['organization','digest'], name='org_import_digest')]
+
+
+class SecretaryInvite(ScopedModel):
+    tenant_relations = ()
+    organization = models.ForeignKey(Organisation, on_delete=models.PROTECT)
+    token_hash = models.CharField(max_length=64, unique=True)
+    email = models.EmailField()
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='sent_invites')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    used_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name='accepted_invites')
+    revoked_at = models.DateTimeField(null=True, blank=True)

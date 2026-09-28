@@ -1,0 +1,8 @@
+(() => {
+const input=document.querySelector('#logo-upload'),form=document.querySelector('#signup-form');
+if(!input||!form)return;
+const fields=['primary','secondary','accent'];
+function preview(){const hex=form.elements.primary.value;const rgb=hex.slice(1).match(/../g).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);const light=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];const box=document.querySelector('#theme-preview');box.style.background=hex;box.style.color=light>.179?'#000000':'#ffffff';}
+fields.forEach(k=>form.elements[k].addEventListener('input',preview));preview();let version=0;
+input.addEventListener('change',async()=>{const current=++version;const submit=form.querySelector('button[type=submit]');form.elements.logo_token.value='';document.querySelector('#logo-error').textContent='';document.querySelector('#logo-preview').hidden=true;const file=input.files[0];submit.disabled=!!file;if(!file)return;try{const data=new FormData();data.append('logo',file);const response=await fetch('/api/branding/preview/',{method:'POST',headers:{'X-CSRFToken':form.elements.csrfmiddlewaretoken.value},body:data});const result=await response.json();if(!response.ok)throw Error(result.error||'Unable to read logo.');if(current!==version)return;form.elements.logo_token.value=result.logo_token;fields.forEach(k=>form.elements[k].value=result[k]);preview();const reader=new FileReader();reader.onload=()=>{if(current===version){const img=document.querySelector('#logo-preview');img.src=reader.result;img.hidden=false;}};reader.readAsDataURL(file);}catch(e){if(current===version)document.querySelector('#logo-error').textContent=e.message||'Upload failed. Please try again.';}finally{if(current===version)submit.disabled=false;}});
+})();

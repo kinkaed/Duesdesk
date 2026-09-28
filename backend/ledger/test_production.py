@@ -1,3 +1,4 @@
+from .models import Organisation, UserAccess
 import io
 import json
 from datetime import date
@@ -15,13 +16,15 @@ from .views import member_rows
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend', STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
 class OperationalTests(TestCase):
     def setUp(self):
+        self.org=Organisation.objects.create(name="Test Organization")
         self.secretary=User.objects.create_user('sec',password='A-Fresh-Strong-Password!',is_staff=True,email='sec@example.com')
-        self.member=Member.objects.create(full_name='Sample',joined=date(2026,9,1))
-        self.other=Member.objects.create(full_name='Other',joined=date(2026,9,1))
+        UserAccess.objects.create(organization=self.org,user=self.secretary,role="secretary")
+        self.member=Member.objects.create(organization=self.org,full_name='Sample',joined=date(2026,9,1))
+        self.other=Member.objects.create(organization=self.org,full_name='Other',joined=date(2026,9,1))
         self.reader=User.objects.create_user('member',password='A-Fresh-Strong-Password!',email='member@example.com')
-        UserAccess.objects.create(user=self.reader,role='member',member=self.member)
+        UserAccess.objects.create(organization=self.org,user=self.reader,role='member',member=self.member)
         self.auditor=User.objects.create_user('auditor')
-        UserAccess.objects.create(user=self.auditor,role='auditor')
+        UserAccess.objects.create(organization=self.org,user=self.auditor,role='auditor')
         self.payload={'member_id':self.member.pk,'amount':'100','start_month':'2026-09','payment_date':'2026-09-01','method':'Cash','request_key':str(uuid4())}
         self.client.force_login(self.secretary)
 
@@ -52,7 +55,7 @@ class OperationalTests(TestCase):
         p=record_payment(self.payload,self.secretary)
         void_payment(p.pk,self.secretary,'Wrong covered period')
         self.assertEqual(Payment.objects.count(),1)
-        row=member_rows(date(2026,9,1))[1] if self.member.full_name=='Z' else next(x for x in member_rows(date(2026,9,1)) if x['id']==self.member.pk)
+        row=member_rows(date(2026,9,1),self.secretary)[1] if self.member.full_name=='Z' else next(x for x in member_rows(date(2026,9,1),self.secretary) if x['id']==self.member.pk)
         self.assertEqual(Decimal(row['balance']),25)
         self.assertEqual(AuditEvent.objects.filter(action='payment.voided').count(),1)
         self.assertContains(self.client.get(f'/receipts/{p.pk}/'),'VOID')
@@ -69,7 +72,7 @@ class OperationalTests(TestCase):
 
     def test_ending_membership_preserves_old_arrears(self):
         self.member.billing_end=date(2026,10,1);self.member.status='Inactive';self.member.save()
-        row=next(x for x in member_rows(date(2026,12,1)) if x['id']==self.member.pk)
+        row=next(x for x in member_rows(date(2026,12,1),self.secretary) if x['id']==self.member.pk)
         self.assertEqual(Decimal(row['arrears']),50)
         self.assertEqual(row['status'],'Not due')
 
@@ -107,7 +110,7 @@ class OperationalTests(TestCase):
         file=SimpleUploadedFile('payments.csv',f'member_id,amount,start_month,payment_date,method\n{self.member.pk},10,2026-09,2026-09-01,Cash\n{self.member.pk},15,2026-09,2026-09-01,Cash\n'.encode())
         token=self.client.post('/api/import/preview/',{'kind':'payments','file':file}).json()['token']
         self.assertEqual(self.post('/api/import/commit/',{'token':token}).status_code,200)
-        row=next(x for x in member_rows(date(2026,9,1)) if x['id']==self.member.pk)
+        row=next(x for x in member_rows(date(2026,9,1),self.secretary) if x['id']==self.member.pk)
         self.assertEqual(row['status'],'Paid')
 
     def test_user_creation_validates_password_and_role(self):
@@ -123,8 +126,8 @@ class OperationalTests(TestCase):
     def test_disabling_user_blocks_existing_session(self):
         self.assertEqual(self.post(f'/api/accounts/{self.reader.pk}/disable/',{}).status_code,200)
         self.client.force_login(self.reader)
-        self.assertEqual(self.client.get('/api/overview/').status_code,401)
-        self.assertEqual(self.post(f'/api/accounts/{self.secretary.pk}/disable/',{}).status_code,401)
+        self.assertEqual(self.client.get('/api/overview/').status_code,403)
+        self.assertEqual(self.post(f'/api/accounts/{self.secretary.pk}/disable/',{}).status_code,403)
 
     def test_password_recovery_and_throttle(self):
         self.client.logout()

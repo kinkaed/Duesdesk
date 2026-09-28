@@ -41,7 +41,7 @@ In **Manage → Import records**, download the template, fill it, and upload a U
 - **Auditor:** reads all records, reports and audit history; cannot change them.
 - **Member:** sees only their linked member record, payments, receipts and reports.
 
-Create accounts in **Manage**, using a unique email and a strong initial password. Secretaries can also register at `/signup/`; that flow always creates a secretary role. Share the password privately; ask the recipient to change it. Disabling an account removes access, including existing sessions, while retaining its historical records. To re-enable an account, an operator must use the management shell (`User.objects.filter(username='...').update(is_active=True)`) and record the change operationally. If an older account is missing its access role, assign it explicitly with `python backend/manage.py assign_access <username> --role secretary`; use `--role member --member-id <id>` for a linked member account.
+Create a new organization and its first secretary at `/signup/`. Add other secretaries through **Manage → Invite Secretary**; each person chooses their own password. Disabling access ends their membership access, including existing sessions, while preserving historical records. A trusted operator can reactivate the same membership with `python backend/manage.py assign_access USERNAME --role secretary --organization-id ID`. Existing read-only member/auditor accounts remain scoped to their organization.
 
 Use **Change password** while signed in, or **Forgot your password?** on the sign-in page. Five failed login attempts lock that account for 15 minutes. In local mode recovery emails are written to the server log; in production they require the configured SMTP provider.
 
@@ -53,3 +53,12 @@ Audit history records creation, updates, imports, exports, account changes and p
 ## Download one member's payment report
 
 The secretary opens Members, selects the member's name, then clicks **Download payment report (Excel)**. No member account or input is needed. The file contains only that member: a summary, one row per payment, a separate breakdown of months covered, and monthly balances. Amounts are in GHS. Outstanding dues run through the current month; advance payments are labelled separately. Voided receipts remain visible but do not count toward totals.
+
+
+## Organizations and secretary invitations
+
+Create a new organization at `/signup/`, or open an invitation from an existing secretary to join theirs. Members never need to register. In **Manage**, upload a logo, review the suggested colors and save your branding. Use **Invite Secretary** to generate a link for the specified email; share it privately before its seven-day expiry. Links work once and can be revoked.
+
+To hand over, invite your successor and wait until they have registered. **Leave Organization** works only when another active secretary remains. Your records stay with the organization. Leaving removes your access; contact your operator if you later need the same membership restored. Each account belongs to one organization. Sign out and sign in with the other organization’s account to switch workspaces.
+
+See **ORGANIZATIONS.md** for the schema, migration details and verification.

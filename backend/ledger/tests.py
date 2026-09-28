@@ -1,3 +1,4 @@
+from .models import Organisation, UserAccess
 from datetime import date
 from decimal import Decimal
 from uuid import uuid4
@@ -9,8 +10,10 @@ from .services import record_payment, plan_payment, parse_amount
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
 class PaymentTests(TestCase):
     def setUp(self):
+        self.org=Organisation.objects.create(name="Test Organization")
         self.user=User.objects.create_user(username='secretary',password='TestingOnly25!',is_staff=True)
-        self.member=Member.objects.create(full_name='Test Member',joined=date(2026,1,1))
+        UserAccess.objects.create(organization=self.org,user=self.user,role="secretary")
+        self.member=Member.objects.create(organization=self.org,full_name='Test Member',joined=date(2026,1,1))
         self.payload={'member_id':self.member.pk,'amount':'100','start_month':'2026-09','payment_date':'2026-09-01','method':'Cash','request_key':str(uuid4())}
 
     def test_four_month_payment_and_one_receipt(self):

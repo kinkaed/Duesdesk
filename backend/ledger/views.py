@@ -25,9 +25,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from .forms import SignupForm
-from .models import Member, Payment, Allocation, DuesMonth, UserAccess, AuditEvent, Organisation, RecoveryAttempt, ImportBatch
-from .access import role_for, visible_members, visible_payments
+from .models import Member, Payment, Allocation, DuesMonth, UserAccess, AuditEvent, Organisation, RecoveryAttempt, ImportBatch, SecretaryInvite
+from .access import role_for, visible_members, visible_payments, organization_for, membership
 from .services import RATE, next_month, parse_month, parse_amount, plan_payment, record_payment, void_payment, audit
+
+from .branding import branding_json, color, read_logo_token
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,14 @@ def api(view):
         if request.method not in ('GET','HEAD') and role != 'secretary':
             return JsonResponse({'error': 'Your account is read-only.'}, status=403)
         try:
+            if request.method not in ('GET', 'HEAD'):
+                with transaction.atomic():
+                    org = organization_for(request.user)
+                    if not org:return JsonResponse({'error':'Your organization access has ended.'},status=403)
+                    Organisation.objects.select_for_update().get(pk=org.pk)
+                    if organization_for(request.user) != org or role_for(request.user) != 'secretary':
+                        return JsonResponse({'error':'Your organization access has ended.'}, status=403)
+                    return view(request, *args, **kwargs)
             return view(request, *args, **kwargs)
         except (ValueError, TypeError, ValidationError, Member.DoesNotExist, Payment.DoesNotExist) as error:
             message = '; '.join(error.messages) if isinstance(error, ValidationError) else str(error)
@@ -61,43 +71,29 @@ def body(request):
     except (ValueError, UnicodeDecodeError):
         raise ValueError('Send a valid form.')
 
-def member_rows(month, user=None):
-    people = list((visible_members(user) if user else Member.objects.all()).order_by('full_name'))
-    amounts = Allocation.objects.filter(payment__voided_at__isnull=True, payment__member__in=people, dues_month__month__lte=month).values('payment__member_id','dues_month__month').annotate(total=Sum('amount'))
+def member_rows(month, user):
+    people = list(visible_members(user).order_by('full_name'))
+    amounts = Allocation.objects.filter(organization=organization_for(user), payment__voided_at__isnull=True, payment__member__in=people, dues_month__month__lte=month).values('payment__member_id','dues_month__month').annotate(total=Sum('amount'))
     paid = {(r['payment__member_id'], r['dues_month__month']): r['total'] for r in amounts}
-    rates = dict(DuesMonth.objects.filter(month__lte=month).values_list('month','amount_due'))
+    rates = {(d.organization_id,d.month): d.amount_due for d in DuesMonth.objects.filter(organization_id__in={p.organization_id for p in people},month__lte=month)}
     rows = []
     for person in people:
         start = person.joined.replace(day=1)
         applicable = start <= month and (not person.billing_end or month <= person.billing_end)
         amount = paid.get((person.pk, month), Decimal('0'))
-        balance = max(Decimal('0'), rates.get(month,RATE) - amount) if applicable else Decimal('0')
+        balance = max(Decimal('0'), rates.get((person.organization_id,month),RATE) - amount) if applicable else Decimal('0')
         status = ('Paid' if balance == 0 else 'Partial' if amount else 'Unpaid') if applicable else 'Not due'
         arrears = Decimal('0')
         cursor = start
         last = min(month, person.billing_end) if person.billing_end else month
         while cursor <= last:
-            arrears += max(Decimal('0'), rates.get(cursor,RATE) - paid.get((person.pk,cursor),Decimal('0')))
+            arrears += max(Decimal('0'), rates.get((person.organization_id,cursor),RATE) - paid.get((person.pk,cursor),Decimal('0')))
             cursor = next_month(cursor)
         rows.append({'id':person.pk,'code':person.code,'name':person.full_name,'phone':person.phone,'email':person.email,'joined':person.joined.isoformat(),'billing_end':person.billing_end.strftime('%Y-%m') if person.billing_end else '', 'member_status':person.status,'paid':str(amount),'balance':str(balance),'arrears':str(arrears),'status':status})
     return rows
 
 def payment_json(payment):
     return {'id':payment.pk,'receipt':payment.receipt_number,'member_id':payment.member_id,'member':payment.member_name_snapshot or payment.member.full_name,'amount':str(payment.amount_received),'date':payment.payment_date.isoformat(),'method':payment.method,'reference':payment.reference,'notes':payment.notes,'voided':bool(payment.voided_at),'void_reason':payment.void_reason,'allocations':[{'month':a.dues_month.month.strftime('%B %Y'),'amount':str(a.amount)} for a in payment.allocations.all()]}
-
-@require_http_methods(['GET', 'POST'])
-def signup(request):
-    if request.user.is_authenticated:
-        return redirect(settings.LOGIN_REDIRECT_URL)
-    form = SignupForm(request.POST or None)
-    if request.method == 'POST' and form.is_valid():
-        with transaction.atomic():
-            user = form.save()
-            UserAccess.objects.create(user=user, role='secretary')
-        login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-        return redirect(settings.LOGIN_REDIRECT_URL)
-    return render(request, 'registration/signup.html', {'form': form})
-
 
 @login_required
 def home(request):
@@ -108,8 +104,8 @@ def home(request):
 @require_GET
 @ensure_csrf_cookie
 def session_info(request):
-    org=Organisation.objects.first()
-    return JsonResponse({'username':request.user.get_full_name() or request.user.username,'role':role_for(request.user),'user_id':request.user.pk,'today':timezone.localdate().isoformat(),'demo':settings.DEMO_MODE,'organisation':org.name if org else 'Membership Association'})
+    org=organization_for(request.user)
+    return JsonResponse({'username':request.user.get_full_name() or request.user.username,'role':role_for(request.user),'user_id':request.user.pk,'today':timezone.localdate().isoformat(),'demo':settings.DEMO_MODE,'organisation':org.name, 'branding':branding_json(org)})
 
 @api
 @require_GET
@@ -120,7 +116,7 @@ def overview(request):
     records = visible_payments(request.user)
     transactions = records.filter(voided_at__isnull=True,payment_date__gte=month,payment_date__lt=next_month(month))
     collections = transactions.aggregate(total=Sum('amount_received'))['total'] or 0
-    assigned = Allocation.objects.filter(payment__in=records,payment__voided_at__isnull=True,dues_month__month=month).aggregate(total=Sum('amount'))['total'] or 0
+    assigned = Allocation.objects.filter(organization=organization_for(request.user), payment__in=records,payment__voided_at__isnull=True,dues_month__month=month).aggregate(total=Sum('amount'))['total'] or 0
     recent = records.select_related('member').prefetch_related('allocations__dues_month').order_by('-created_at')[:8]
     return JsonResponse({'members':rows,'role':role_for(request.user),'metrics':{'collections':str(collections),'assigned':str(assigned),'outstanding':str(sum(Decimal(r['balance']) for r in due)),'arrears':str(sum(Decimal(r['arrears']) for r in rows)),'paid':sum(r['status']=='Paid' for r in due),'active':len(due)},'recent':[payment_json(p) for p in recent]})
 
@@ -132,7 +128,7 @@ def fill_member(person,data):
     if end and end<joined.replace(day=1): raise ValueError('Last billable month cannot be before the joining month.')
     if person.pk and person.payments.exists():
         if person.joined!=joined: raise ValueError('Joining date is locked after the first payment. Contact your administrator to correct historical billing.')
-        if end and Allocation.objects.filter(payment__member=person,payment__voided_at__isnull=True,dues_month__month__gt=end).exists():
+        if end and Allocation.objects.filter(organization=person.organization, payment__member=person,payment__voided_at__isnull=True,dues_month__month__gt=end).exists():
             raise ValueError('There are payments beyond the chosen last billable month. Correct those payments first.')
     person.full_name=str(data.get('name','')).strip()
     person.phone=str(data.get('phone','')).strip()
@@ -148,7 +144,7 @@ def fill_member(person,data):
 def members(request):
     if request.method=='GET':return JsonResponse({'members':member_rows(timezone.localdate().replace(day=1),request.user)})
     with transaction.atomic():
-        person=fill_member(Member(),body(request));person.save()
+        person=fill_member(Member(organization=organization_for(request.user)),body(request));person.save()
         audit(request.user,'member.created',person,{'name':person.full_name,'joined':person.joined})
     return JsonResponse({'id':person.pk,'name':person.full_name,'code':person.code},status=201)
 
@@ -163,7 +159,7 @@ def member_detail(request,pk):
             audit(request.user,'member.updated',member,{'before':before,'after':{'name':member.full_name,'phone':member.phone,'email':member.email,'status':member.status,'billing_end':member.billing_end}})
         return JsonResponse({'id':member.pk,'name':member.full_name})
     member=get_object_or_404(visible_members(request.user),pk=pk)
-    records=member.payments.select_related('member').prefetch_related('allocations__dues_month').order_by('-payment_date','-id')
+    records=visible_payments(request.user).filter(member=member).select_related('member').prefetch_related('allocations__dues_month').order_by('-payment_date','-id')
     total=records.filter(voided_at__isnull=True).aggregate(total=Sum('amount_received'))['total'] or 0
     row=next(r for r in member_rows(timezone.localdate().replace(day=1),request.user) if r['id']==member.pk)
     return JsonResponse({**row,'total':str(total),'payments':[payment_json(p) for p in records]})
@@ -172,7 +168,7 @@ def member_detail(request,pk):
 @require_http_methods(['POST'])
 def payment_preview(request):
     data=body(request)
-    member=Member.objects.get(pk=int(data.get('member_id',0)))
+    member=visible_members(request.user).get(pk=int(data.get('member_id',0)))
     plan=plan_payment(member,parse_amount(data.get('amount')),parse_month(data.get('start_month')))
     return JsonResponse({'allocations':[{'month':p['month'].strftime('%B %Y'),'amount':str(p['amount']),'status':p['status']} for p in plan]})
 
@@ -245,20 +241,24 @@ def export_excel(request):
 @require_http_methods(['GET','POST'])
 def organisation_settings(request):
     if not secretary_only(request):return HttpResponse(status=403)
-    item,_=Organisation.objects.get_or_create(pk=1)
+    item=organization_for(request.user)
     if request.method=='POST':
         with transaction.atomic():
             data=body(request)
-            item.name=str(data.get('name','')).strip();item.contact=str(data.get('contact','')).strip();item.receipt_footer=str(data.get('receipt_footer','')).strip()
+            item.name=str(data.get('name',item.name)).strip();item.contact=str(data.get('contact',item.contact)).strip();item.receipt_footer=str(data.get('receipt_footer',item.receipt_footer)).strip()
+            for field in ('primary','secondary','accent'):
+                if field in data:setattr(item,field,color(data[field]))
+            if data.get('logo_token'):item.logo=read_logo_token(data['logo_token'],f'org:{item.pk}')
+            if data.get('remove_logo'):item.logo=b''
             item.full_clean();item.save();audit(request.user,'organisation.updated',item,{'name':item.name})
-    return JsonResponse({'name':item.name,'contact':item.contact,'receipt_footer':item.receipt_footer})
+    return JsonResponse({**branding_json(item),'name':item.name,'contact':item.contact,'receipt_footer':item.receipt_footer})
 
 @api
 @require_GET
 def audit_log(request):
     if role_for(request.user) not in ('secretary','auditor'):return HttpResponse(status=403)
     page=max(1,int(request.GET.get('page',1)))
-    records=AuditEvent.objects.select_related('actor')
+    records=AuditEvent.objects.filter(organization=organization_for(request.user)).select_related('actor')
     return JsonResponse({'events':[{'id':e.pk,'date':e.created_at.isoformat(),'actor':e.actor.username if e.actor else 'System','action':e.action,'entity':e.entity,'entity_id':e.entity_id,'details':json.loads(e.details)} for e in records[(page-1)*100:page*100]],'page':page,'has_more':records.count()>page*100})
 
 @api
@@ -266,19 +266,20 @@ def audit_log(request):
 def accounts(request):
     if not secretary_only(request):return HttpResponse(status=403)
     if request.method=='GET':
-        return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':role_for(u) or 'None','active':u.is_active} for u in User.objects.select_related('access').order_by('username')]})
+        return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':role_for(u) or 'None','active':u.is_active and u.access.active} for u in User.objects.filter(access__organization=organization_for(request.user)).select_related('access').order_by('username')]})
     data=body(request)
     with transaction.atomic():
         user=User(username=str(data.get('username','')).strip(),email=str(data.get('email','')).strip())
         if not user.email:raise ValueError('Email is required for account recovery.')
         if User.objects.filter(email__iexact=user.email).exists():raise ValueError('An account already uses this email.')
         role=data.get('role')
+        if role == 'secretary':raise ValueError('Use Invite Secretary to add a secretary.')
         if role not in ('secretary','auditor','member'):raise ValueError('Choose a valid role.')
         member=None
-        if role=='member':member=Member.objects.get(pk=int(data.get('member_id',0)))
+        if role=='member':member=visible_members(request.user).get(pk=int(data.get('member_id',0)))
         password=data.get('password','');validate_password(password,user)
         user.set_password(password);user.full_clean();user.save()
-        access=UserAccess(user=user,role=role,member=member);access.full_clean();access.save()
+        access=UserAccess(organization=organization_for(request.user),user=user,role=role,member=member);access.full_clean();access.save()
         audit(request.user,'account.created',user,{'role':role,'member_id':member.pk if member else None})
     return JsonResponse({'id':user.pk,'username':user.username},status=201)
 
@@ -288,9 +289,11 @@ def disable_account(request,pk):
     if not secretary_only(request):return HttpResponse(status=403)
     if pk==request.user.pk:raise ValueError('You cannot disable your own account.')
     with transaction.atomic():
-        user=get_object_or_404(User.objects.select_for_update(),pk=pk)
+        user=get_object_or_404(User.objects.filter(access__organization=organization_for(request.user)).select_for_update(),pk=pk)
         if user.is_superuser and not request.user.is_superuser:raise ValueError('Only a superuser can disable a superuser.')
-        user.is_active=False;user.save(update_fields=['is_active']);audit(request.user,'account.disabled',user)
+        access=user.access;access.active=False;access.save(update_fields=['active'])
+        SecretaryInvite.objects.filter(organization=access.organization,created_by=user,used_at__isnull=True,revoked_at__isnull=True).update(revoked_at=timezone.now())
+        audit(request.user,'account.disabled',user)
     return JsonResponse({'ok':True})
 
 @api
@@ -317,9 +320,9 @@ def import_preview(request):
     for i,row in enumerate(rows,2):
         if None in row or any(v is None for v in row.values()):raise ValueError(f'Row {i}: column count does not match the header.')
         try:
-            if kind=='members':fill_member(Member(),row)
+            if kind=='members':fill_member(Member(organization=organization_for(request.user)),row)
             else:
-                member=Member.objects.get(pk=int(row['member_id']))
+                member=visible_members(request.user).get(pk=int(row['member_id']))
                 plan_payment(member,parse_amount(row['amount']),parse_month(row['start_month']))
                 payment_date=date.fromisoformat(row['payment_date'])
                 if not date(2000,1,1)<=payment_date<=timezone.localdate():raise ValueError('Invalid payment date.')
@@ -329,7 +332,7 @@ def import_preview(request):
                     if len(str(row.get(field, '')).strip()) > limit:
                         raise ValueError(f'{field.capitalize()} must be {limit} characters or fewer.')
         except (ValueError,ValidationError,Member.DoesNotExist) as e:raise ValueError(f'Row {i}: {e}')
-    token=signing.dumps({'rows':rows,'kind':kind,'user':request.user.pk},salt='csv-import',compress=True)
+    token=signing.dumps({'rows':rows,'kind':kind,'user':request.user.pk,'organization':organization_for(request.user).pk},salt='csv-import',compress=True)
     return JsonResponse({'token':token,'count':len(rows),'preview':rows[:8],'kind':kind})
 
 @api
@@ -337,16 +340,17 @@ def import_preview(request):
 def import_commit(request):
     try:payload=signing.loads(body(request).get('token',''),salt='csv-import',max_age=600)
     except signing.BadSignature:raise ValueError('The preview expired. Upload the file again.')
+    if payload.get('organization') != organization_for(request.user).pk:raise ValueError('This preview belongs to another organization.')
     if payload['user']!=request.user.pk:raise ValueError('This preview belongs to another user.')
     digest=hashlib.sha256(json.dumps({'kind':payload['kind'],'rows':payload['rows']},sort_keys=True).encode()).hexdigest()
     with transaction.atomic():
-        if ImportBatch.objects.filter(digest=digest).exists():raise ValueError('This exact file has already been imported.')
-        batch=ImportBatch.objects.create(digest=digest,kind=payload['kind'],row_count=len(payload['rows']),created_by=request.user)
+        if ImportBatch.objects.filter(organization=organization_for(request.user),digest=digest).exists():raise ValueError('This exact file has already been imported.')
+        batch=ImportBatch.objects.create(organization=organization_for(request.user),digest=digest,kind=payload['kind'],row_count=len(payload['rows']),created_by=request.user)
         for row_index,row in enumerate(payload['rows'],1):
             if payload['kind']=='members':
-                member=fill_member(Member(),row);member.save();audit(request.user,'member.imported',member,{'batch':batch.pk})
+                member=fill_member(Member(organization=organization_for(request.user)),row);member.save();audit(request.user,'member.imported',member,{'batch':batch.pk})
             else:
-                row['request_key']=str(uuid5(NAMESPACE_URL,f'duesdesk:{digest}:{row_index}'))
+                row['request_key']=str(uuid5(NAMESPACE_URL,f'duesdesk:{organization_for(request.user).pk}:{digest}:{row_index}'))
                 record_payment(row,request.user)
         audit(request.user,'import.completed',batch,{'kind':batch.kind,'rows':batch.row_count})
     return JsonResponse({'count':batch.row_count})
@@ -383,17 +387,17 @@ def member_report(request, pk):
     """Secretary-requested statement: one receipt row, separate monthly allocations."""
     if not secretary_only(request):
         return HttpResponse(status=403)
-    member = get_object_or_404(Member, pk=pk)
+    member = get_object_or_404(visible_members(request.user), pk=pk)
     today = timezone.localdate()
     current_month = today.replace(day=1)
-    payments = list(member.payments.prefetch_related('allocations__dues_month').order_by('payment_date', 'pk'))
+    payments = list(visible_payments(request.user).filter(member=member).prefetch_related('allocations__dues_month').order_by('payment_date', 'pk'))
     allocated = {}
     for payment in payments:
         if not payment.voided_at:
             for allocation in payment.allocations.all():
                 month = allocation.dues_month.month
                 allocated[month] = allocated.get(month, Decimal('0')) + allocation.amount
-    rates = dict(DuesMonth.objects.values_list('month', 'amount_due'))
+    rates = dict(DuesMonth.objects.filter(organization=member.organization).values_list('month', 'amount_due'))
     monthly_rows = []
     arrears = Decimal('0')
     cursor = member.joined.replace(day=1)
@@ -410,7 +414,7 @@ def member_report(request, pk):
     workbook = Workbook()
     summary = workbook.active
     summary.title = 'Summary'
-    org = Organisation.objects.first()
+    org = organization_for(request.user)
     for row in [
         ['Member payment report', 'Value'],
         ['Organisation', org.name if org else 'Membership Association'],

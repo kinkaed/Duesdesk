@@ -1,13 +1,13 @@
 from django.contrib.auth import views as auth
 from django.urls import path
-from ledger import views
+from ledger import views, organization_views as org_views
 
 urlpatterns = [
     path('', views.home),
     path('api/session/', views.session_info),
     path('login/', auth.LoginView.as_view(), name='login'),
     path('logout/', auth.LogoutView.as_view()),
-    path('signup/', views.signup, name='signup'),
+    path('signup/', org_views.signup, name='signup'),
     path('account/password/', auth.PasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),
     path('account/password/done/', auth.PasswordChangeDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password changed','description':'Your new password is ready to use.'}), name='password_change_done'),
     path('account/reset/', views.RecoveryView.as_view(), name='password_reset'),
@@ -31,5 +31,10 @@ urlpatterns = [
     path('api/import/template/', views.import_template),
     path('api/import/preview/', views.import_preview),
     path('api/import/commit/', views.import_commit),
+    path('api/branding/preview/', org_views.logo_preview),
+    path('api/invites/', org_views.invites),
+    path('api/invites/<int:pk>/revoke/', org_views.revoke_invite),
+    path('api/organization/leave/', org_views.leave),
+    path('organizations/<uuid:public_id>/logo/', org_views.logo),
     path('health/', views.health),
 ]

@@ -1,20 +1,32 @@
-from .models import Member, Payment
+from .models import Member, Payment, UserAccess
 
-def role_for(user):
+
+def membership(user):
     if not user.is_authenticated or not user.is_active:
         return None
-    try:
-        return user.access.role
-    except AttributeError:
-        return 'secretary' if user.is_staff or user.is_superuser else None
+    return UserAccess.objects.select_related('organization').filter(user=user, active=True).first()
+
+
+def organization_for(user):
+    access = membership(user)
+    return access.organization if access else None
+
+
+def role_for(user):
+    access = membership(user)
+    return access.role if access else None
+
 
 def visible_members(user):
-    role = role_for(user)
-    if role in ('secretary', 'auditor'):
-        return Member.objects.all()
-    if role == 'member':
-        return Member.objects.filter(pk=user.access.member_id)
-    return Member.objects.none()
+    access = membership(user)
+    if not access:
+        return Member.objects.none()
+    rows = Member.objects.filter(organization_id=access.organization_id)
+    if access.role in ('secretary', 'auditor'):
+        return rows
+    return rows.filter(pk=access.member_id) if access.role == 'member' else rows.none()
+
 
 def visible_payments(user):
-    return Payment.objects.filter(member__in=visible_members(user))
+    org = organization_for(user)
+    return Payment.objects.filter(organization=org, member__in=visible_members(user)) if org else Payment.objects.none()

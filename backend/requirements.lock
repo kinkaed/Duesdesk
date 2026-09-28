@@ -13,3 +13,4 @@ typing_extensions==4.16.0
 tzdata==2026.4
 waitress==3.0.2
 whitenoise==6.12.0
+Pillow==12.3.0

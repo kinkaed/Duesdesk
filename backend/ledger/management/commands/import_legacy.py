@@ -45,6 +45,7 @@ class Command(BaseCommand):
         parser.add_argument('--force', action='store_true', help='Allow import into a non-empty ledger.')
 
     def handle(self, *args, **options):
+        raise CommandError('Legacy snapshots must be imported on the pre-organization release into a separate database, then migrated forward. This command cannot overwrite an organization database.')
         if connection.vendor != 'postgresql':
             raise CommandError('The legacy import targets PostgreSQL only. Configure DATABASE_URL first.')
         input_path = Path(options['input'])

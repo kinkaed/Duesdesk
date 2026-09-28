@@ -6,12 +6,14 @@ import json
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
-from .models import Member, Payment, DuesMonth, Allocation, AuditEvent
+from .models import Member, Payment, DuesMonth, Allocation, AuditEvent, Organisation
+
+from .access import organization_for, role_for
 
 RATE = Decimal('25.00')
 
 def audit(user, action, obj, details=None):
-    return AuditEvent.objects.create(actor=user, action=action, entity=obj.__class__.__name__, entity_id=str(obj.pk), details=json.dumps(details or {}, default=str))
+    return AuditEvent.objects.create(organization=organization_for(user), actor=user, action=action, entity=obj.__class__.__name__, entity_id=str(obj.pk), details=json.dumps(details or {}, default=str))
 
 def next_month(value):
     return date(value.year + (value.month == 12), value.month % 12 + 1, 1)
@@ -39,8 +41,8 @@ def plan_payment(member, amount, month):
         raise ValueError('Only active members can receive a new payment.')
     if month < member.joined.replace(day=1):
         raise ValueError('The covered period cannot begin before the member joined.')
-    paid = dict(Allocation.objects.filter(payment__member=member, payment__voided_at__isnull=True, dues_month__month__gte=month).values('dues_month__month').annotate(total=Sum('amount')).values_list('dues_month__month', 'total'))
-    rates = dict(DuesMonth.objects.filter(month__gte=month).values_list('month', 'amount_due'))
+    paid = dict(Allocation.objects.filter(organization=member.organization, payment__member=member, payment__voided_at__isnull=True, dues_month__month__gte=month).values('dues_month__month').annotate(total=Sum('amount')).values_list('dues_month__month', 'total'))
+    rates = dict(DuesMonth.objects.filter(organization=member.organization, month__gte=month).values_list('month', 'amount_due'))
     remaining = amount
     result = []
     for _ in range(240):
@@ -69,12 +71,18 @@ def record_payment(data, user):
         raise ValueError('The payment date cannot be in the future.')
     if payment_date.year < 2000:
         raise ValueError('Choose a payment date from 2000 onwards.')
-    member = Member.objects.select_for_update().get(pk=member_id)
+    org = organization_for(user)
+    if not org or role_for(user) != 'secretary':
+        raise ValueError('Secretary access is required.')
+    Organisation.objects.select_for_update().get(pk=org.pk)
+    if organization_for(user) != org or role_for(user) != 'secretary':
+        raise ValueError('Your organization access has ended.')
+    member = Member.objects.select_for_update().get(pk=member_id, organization=org)
     amount = parse_amount(data.get('amount'))
     month = parse_month(data.get('start_month'))
     normalized = {'member_id': member_id, 'amount': str(amount.quantize(Decimal('.01'))), 'start_month': month.isoformat(), 'payment_date': payment_date.isoformat(), 'method': data.get('method'), 'reference': str(data.get('reference', '')).strip(), 'notes': str(data.get('notes', '')).strip()}
     fingerprint = hashlib.sha256(json.dumps(normalized, sort_keys=True).encode()).hexdigest()
-    existing = Payment.objects.filter(request_key=key).first()
+    existing = Payment.objects.filter(organization=org, request_key=key).first()
     if existing:
         if existing.member_id != member.pk or existing.amount_received != amount or existing.created_by_id != user.pk or existing.request_fingerprint != fingerprint:
             raise ValueError('This save request has already been used. Reload and try again.')
@@ -82,12 +90,12 @@ def record_payment(data, user):
     if data.get('method') not in dict(Payment._meta.get_field('method').choices):
         raise ValueError('Select a payment method.')
     plan = plan_payment(member, amount, month)
-    payment = Payment(member=member, amount_received=amount, payment_date=payment_date, method=data['method'], reference=normalized['reference'], notes=normalized['notes'], request_key=key, created_by=user, member_name_snapshot=member.full_name, request_fingerprint=fingerprint)
+    payment = Payment(organization=org, member=member, amount_received=amount, payment_date=payment_date, method=data['method'], reference=normalized['reference'], notes=normalized['notes'], request_key=key, created_by=user, member_name_snapshot=member.full_name, request_fingerprint=fingerprint)
     payment.full_clean()
     payment.save()
     for item in plan:
-        dues, _ = DuesMonth.objects.get_or_create(month=item['month'], defaults={'amount_due': item['dues']})
-        Allocation.objects.create(payment=payment, dues_month=dues, amount=item['amount'])
+        dues, _ = DuesMonth.objects.get_or_create(organization=org, month=item['month'], defaults={'amount_due': item['dues']})
+        Allocation.objects.create(organization=org, payment=payment, dues_month=dues, amount=item['amount'])
     audit(user, 'payment.recorded', payment, {'amount': str(amount), 'member_id': member.pk, 'months': [p['month'] for p in plan]})
     return payment
 
@@ -96,9 +104,15 @@ def void_payment(pk, user, reason):
     reason = str(reason).strip()
     if not 5 <= len(reason) <= 500:
         raise ValueError('Enter a correction reason between 5 and 500 characters.')
-    item = Payment.objects.get(pk=pk)
-    Member.objects.select_for_update().get(pk=item.member_id)
-    item = Payment.objects.select_for_update().get(pk=pk)
+    org = organization_for(user)
+    if not org or role_for(user) != 'secretary':
+        raise ValueError('Secretary access is required.')
+    Organisation.objects.select_for_update().get(pk=org.pk)
+    if organization_for(user) != org or role_for(user) != 'secretary':
+        raise ValueError('Your organization access has ended.')
+    item = Payment.objects.get(pk=pk, organization=org)
+    Member.objects.select_for_update().get(pk=item.member_id,organization=org)
+    item = Payment.objects.select_for_update().get(pk=pk, organization=org)
     if item.voided_at:
         raise ValueError('This payment has already been voided.')
     item.voided_at = timezone.now()

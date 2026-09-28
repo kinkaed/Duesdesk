@@ -1,3 +1,4 @@
+from .models import Organisation, UserAccess
 import io
 import json
 from datetime import date
@@ -14,9 +15,11 @@ from .services import record_payment
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
 class ReleaseTests(TestCase):
     def setUp(self):
+        self.org=Organisation.objects.create(name="Test Organization")
         self.user = User.objects.create_user('release-secretary', is_staff=True)
+        UserAccess.objects.create(organization=self.org,user=self.user,role="secretary")
         self.client.force_login(self.user)
-        self.member = Member.objects.create(full_name='Release sample', joined=date(2026, 9, 1))
+        self.member = Member.objects.create(organization=self.org,full_name='Release sample', joined=date(2026, 9, 1))
         self.payload = {'member_id': self.member.pk, 'amount': '100', 'start_month': '2026-09',
                         'payment_date': '2026-09-01', 'method': 'Cash', 'request_key': str(uuid4())}
 

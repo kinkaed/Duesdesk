@@ -1,11 +1,15 @@
 from django.core.management.base import BaseCommand, CommandError
-from django.db.models import Sum
-from ledger.models import Payment, Allocation, DuesMonth
+from django.db.models import Sum, F
+from ledger.models import Payment, Allocation, DuesMonth, UserAccess
 
 class Command(BaseCommand):
     help='Read-only reconciliation of payment totals, allocations and monthly balances.'
     def handle(self,*args,**kwargs):
         errors=[]
+        for model,relations in [(Payment,['member']),(Allocation,['payment','dues_month']),(UserAccess,['member'])]:
+            for relation in relations:
+                if model.objects.filter(**{relation+'__isnull':False}).exclude(organization_id=F(relation+'__organization_id')).exists():
+                    errors.append(f'{model.__name__}: cross-organization {relation} relationship')
         for p in Payment.objects.annotate(allocated=Sum('allocations__amount')):
             if p.allocated != p.amount_received: errors.append(f'{p.receipt_number}: allocation total differs from money received')
         months={d.pk:d for d in DuesMonth.objects.all()}
