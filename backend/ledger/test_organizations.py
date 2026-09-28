@@ -150,7 +150,7 @@ class OrganizationTests(TestCase):
         with self.assertRaises(ValidationError):
             Allocation.objects.create(organization=self.a,payment=self.pa,dues_month=DuesMonth.objects.filter(organization=self.b).first(),amount=1)
         with self.assertRaises(ValidationError):
-            UserAccess.objects.create(organization=self.a,user=User.objects.create_user('bad-link'),role='member',member=self.mb)
+            UserAccess.objects.create(organization=self.a,user=User.objects.create_user('bad-link'),role='auditor',member=self.mb)
         self.ma.organization=self.b
         with self.assertRaises(ValidationError):self.ma.save()
 

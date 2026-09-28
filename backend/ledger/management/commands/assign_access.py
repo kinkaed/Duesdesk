@@ -1,7 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 
-from ledger.models import Member, UserAccess, Organisation
+from ledger.models import UserAccess, Organisation
 
 
 class Command(BaseCommand):
@@ -10,7 +10,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('username')
         parser.add_argument('--organization-id', type=int, required=True)
-        parser.add_argument('--role', choices=['secretary', 'auditor', 'member'], default='secretary')
+        parser.add_argument('--role', choices=['secretary', 'auditor'], default='secretary')
         parser.add_argument('--member-id', type=int)
 
     def handle(self, *args, **options):
@@ -23,20 +23,14 @@ class Command(BaseCommand):
         existing=UserAccess.objects.filter(user=user).first()
         if existing and existing.organization_id!=org.pk:raise CommandError('Cannot transfer an existing membership to another organization.')
         role = options['role']
-        member = None
-        if role == 'member':
-            member_id = options['member_id']
-            if not member_id:
-                raise CommandError('A linked member is required for the member role.')
-            member = Member.objects.filter(pk=member_id,organization=org).first()
-            if not member:
-                raise CommandError(f'Member {member_id} was not found.')
-        elif options['member_id']:
-            raise CommandError('A linked member can only be set for the member role.')
+        # Members are records, not accounts, so a member is never linked here.
+        # --member-id is rejected outright rather than silently ignored.
+        if options['member_id']:
+            raise CommandError('Members are records, not accounts, and cannot be linked to a login.')
 
         access, created = UserAccess.objects.update_or_create(
             user=user,
-            defaults={'role': role, 'member': member, 'organization':org, 'active':True},
+            defaults={'role': role, 'member': None, 'organization':org, 'active':True},
         )
         action = 'Created' if created else 'Updated'
         self.stdout.write(self.style.SUCCESS(f'{action} {role} access for {user.username} (access #{access.pk}).'))

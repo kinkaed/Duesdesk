@@ -39,9 +39,9 @@ In **Manage → Import records**, download the template, fill it, and upload a U
 
 - **Secretary:** manages members, payments, corrections, imports, reports, organisation details and accounts. Give this role only to trusted administrators.
 - **Auditor:** reads all records, reports and audit history; cannot change them.
-- **Member:** sees only their linked member record, payments, receipts and reports.
+- **Member:** not an account. A member is a record of a person the organization tracks. Members have no username, no password and no way to sign in; a secretary records their payments and hands them a printed receipt or statement.
 
-Create a new organization and its first secretary at `/signup/`. Add other secretaries through **Manage → Invite Secretary**; each person chooses their own password. Disabling access ends their membership access, including existing sessions, while preserving historical records. A trusted operator can reactivate the same membership with `python backend/manage.py assign_access USERNAME --role secretary --organization-id ID`. Existing read-only member/auditor accounts remain scoped to their organization.
+Create a new organization and its first secretary at `/signup/`. Add other secretaries through **Manage → Invite Secretary**; each person chooses their own password. Disabling access ends their access to the organization, including existing sessions, while preserving historical records. A trusted operator can reactivate the same account with `python backend/manage.py assign_access USERNAME --role secretary --organization-id ID`. Secretaries and read-only auditors stay scoped to their own organization, and each payment records which secretary entered it in the audit history.
 
 Use **Change password** while signed in, or **Forgot your password?** on the sign-in page. Five failed login attempts lock that account for 15 minutes. In local mode recovery emails are written to the server log; in production they require the configured SMTP provider.
 

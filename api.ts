@@ -1,4 +1,4 @@
-export type Role='secretary'|'auditor'|'member';
+export type Role='secretary'|'auditor';
 export type Branding={id:number;public_id:string;name:string;logo_url:string;primary:string;secondary:string;accent:string;primary_text:string;secondary_text:string;accent_text:string};
 export type Session={username:string;role:Role;user_id:number;today:string;demo:boolean;organisation:string;branding:Branding};
 export type Member={id:number;code:string;name:string;phone:string;email:string;joined:string;billing_end:string;member_status:string;paid:string;balance:string;arrears:string;status:string};

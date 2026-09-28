@@ -19,12 +19,11 @@ def role_for(user):
 
 def visible_members(user):
     access = membership(user)
-    if not access:
+    # Only an active secretary or auditor sees member records. Members are data
+    # rows, not accounts, so there is no role that narrows this to one member.
+    if not access or access.role not in ('secretary', 'auditor'):
         return Member.objects.none()
-    rows = Member.objects.filter(organization_id=access.organization_id)
-    if access.role in ('secretary', 'auditor'):
-        return rows
-    return rows.filter(pk=access.member_id) if access.role == 'member' else rows.none()
+    return Member.objects.filter(organization_id=access.organization_id)
 
 
 def visible_payments(user):

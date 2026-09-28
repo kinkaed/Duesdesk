@@ -58,7 +58,7 @@ class SignupTests(TestCase):
         response = self.client.get('/')
 
         self.assertEqual(response.status_code, 403)
-        self.assertContains(response, 'assign your account role', status_code=403)
+        self.assertContains(response, 'no active organization access', status_code=403)
 
     def test_assign_access_command_repairs_legacy_user(self):
         user = User.objects.create_user('legacy-user', password=self.password)

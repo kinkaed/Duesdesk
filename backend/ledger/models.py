@@ -94,7 +94,13 @@ class UserAccess(ScopedModel):
     organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
     active = models.BooleanField(default=True)
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='access')
-    role = models.CharField(max_length=12, choices=[('secretary','Secretary'), ('auditor','Auditor'), ('member','Member')])
+    # Members are records, not accounts. No member role exists, so a member can
+    # never be granted a login. Secretaries arrive by invitation; auditors are
+    # read-only accounts a secretary creates.
+    role = models.CharField(max_length=12, choices=[('secretary','Secretary'), ('auditor','Auditor')])
+    # Reserved for a future read-only member portal. It links an account to a
+    # member record but grants no access by itself: access comes from role, and
+    # no role lets a member sign in.
     member = models.OneToOneField(Member, on_delete=models.PROTECT, null=True, blank=True)
 
 class Organisation(models.Model):

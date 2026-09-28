@@ -9,13 +9,13 @@ Django retains the existing British-spelled `ledger_organisation` table to prese
 | Table | Columns / constraints |
 |---|---|
 | `ledger_organisation` | `id` bigint PK; `public_id` UUID unique; `name` varchar(120); `created_at` timestamp; `contact` varchar(200); `receipt_footer` varchar(250); `logo` bytea (normalized PNG); `primary`, `secondary`, `accent` varchar(7), validated six-digit hex colors |
-| `ledger_useraccess` | `id` PK; `user_id` unique FK to auth_user; `organization_id` required FK; `role` secretary/auditor/member; `active` boolean; optional unique member_id FK |
+| `ledger_useraccess` | `id` PK; `user_id` unique FK to auth_user; `organization_id` required FK; `role` secretary/auditor; `active` boolean; optional unique member_id FK, reserved for a future member portal and not a login path |
 | `ledger_secretaryinvite` | `id` PK; required `organization_id` FK; `token_hash` char-compatible varchar(64), unique SHA-256 digest; `email` varchar(254); `created_by_id` FK; `created_at`, `expires_at`; nullable `used_at`, `used_by_id`, `revoked_at` |
 | `ledger_member`, `ledger_payment`, `ledger_allocation`, `ledger_duesmonth`, `ledger_auditevent`, `ledger_importbatch` | Each has required indexed `organization_id` FK with protected deletion |
 | `ledger_duesmonth` | Unique `(organization_id, month)`; monthly rate belongs only to that organization |
 | `ledger_importbatch` | Unique `(organization_id, digest)`; importing the same file into another organization does not conflict |
 
-Member/receipt IDs remain globally unique. This preserves existing receipt references and is not an authorization mechanism. Payment amounts and allocation rules remain unchanged (GH₵25/month). Existing member/auditor roles continue to work within their organization. The secretary UI adds secretaries through invitations.
+Member/receipt IDs remain globally unique. This preserves existing receipt references and is not an authorization mechanism. Payment amounts and allocation rules remain unchanged (GH₵25/month). A member is a data record, not an account: only secretaries and auditors hold roles, members never sign in, and every payment is recorded by a secretary on a member's behalf. Migration 0007 withdraws any member login left over from earlier releases. The secretary UI adds secretaries through invitations.
 
 Logos are small database-backed objects, served by `/organizations/<public UUID>/logo/`. Keeping them in PostgreSQL avoids losing uploads when Render restarts and includes them in database backups. There is no extra storage service or storage key to configure. Organization names, palettes and logos on branded sign-in/invitation pages are intentionally public; financial records and account lists remain private.
 

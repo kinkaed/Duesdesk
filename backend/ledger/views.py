@@ -33,6 +33,11 @@ from .branding import branding_json, color, read_logo_token
 
 logger = logging.getLogger(__name__)
 
+# Members are records, not accounts, so this is never shown to a member: there is
+# no member login to reach it. It covers accounts with no active membership, such
+# as a createsuperuser awaiting assignment or access that has been withdrawn.
+NO_ACCESS = 'Your account has no active organization access. Contact your organization secretary or an administrator.'
+
 def api(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
@@ -40,7 +45,7 @@ def api(view):
             return JsonResponse({'error': 'Your session ended. Please sign in again.'}, status=401)
         role = role_for(request.user)
         if not role:
-            return JsonResponse({'error': 'Your account has no assigned access. Contact the secretary to assign your account role.'}, status=403)
+            return JsonResponse({'error': NO_ACCESS}, status=403)
         if request.method not in ('GET','HEAD') and role != 'secretary':
             return JsonResponse({'error': 'Your account is read-only.'}, status=403)
         try:
@@ -97,7 +102,7 @@ def payment_json(payment):
 
 @login_required
 def home(request):
-    if not role_for(request.user): return HttpResponse('Your account has no assigned access. Contact the secretary to assign your account role.',status=403)
+    if not role_for(request.user): return HttpResponse(NO_ACCESS,status=403)
     return render(request,'react.html')
 
 @api
@@ -274,13 +279,11 @@ def accounts(request):
         if User.objects.filter(email__iexact=user.email).exists():raise ValueError('An account already uses this email.')
         role=data.get('role')
         if role == 'secretary':raise ValueError('Use Invite Secretary to add a secretary.')
-        if role not in ('secretary','auditor','member'):raise ValueError('Choose a valid role.')
-        member=None
-        if role=='member':member=visible_members(request.user).get(pk=int(data.get('member_id',0)))
+        if role != 'auditor':raise ValueError('Choose a valid role.')
         password=data.get('password','');validate_password(password,user)
         user.set_password(password);user.full_clean();user.save()
-        access=UserAccess(organization=organization_for(request.user),user=user,role=role,member=member);access.full_clean();access.save()
-        audit(request.user,'account.created',user,{'role':role,'member_id':member.pk if member else None})
+        access=UserAccess(organization=organization_for(request.user),user=user,role=role);access.full_clean();access.save()
+        audit(request.user,'account.created',user,{'role':role})
     return JsonResponse({'id':user.pk,'username':user.username},status=201)
 
 @api

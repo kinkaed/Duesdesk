@@ -4,7 +4,7 @@ import json
 from datetime import date
 from decimal import Decimal
 from uuid import uuid4
-from django.test import TestCase, override_settings
+from django.test import TestCase, Client, override_settings
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core import mail
@@ -21,28 +21,28 @@ class OperationalTests(TestCase):
         UserAccess.objects.create(organization=self.org,user=self.secretary,role="secretary")
         self.member=Member.objects.create(organization=self.org,full_name='Sample',joined=date(2026,9,1))
         self.other=Member.objects.create(organization=self.org,full_name='Other',joined=date(2026,9,1))
-        self.reader=User.objects.create_user('member',password='A-Fresh-Strong-Password!',email='member@example.com')
-        UserAccess.objects.create(organization=self.org,user=self.reader,role='member',member=self.member)
-        self.auditor=User.objects.create_user('auditor')
+        self.auditor=User.objects.create_user('auditor',password='A-Fresh-Strong-Password!',email='auditor@example.com')
         UserAccess.objects.create(organization=self.org,user=self.auditor,role='auditor')
         self.payload={'member_id':self.member.pk,'amount':'100','start_month':'2026-09','payment_date':'2026-09-01','method':'Cash','request_key':str(uuid4())}
         self.client.force_login(self.secretary)
 
     def post(self,url,data):return self.client.post(url,json.dumps(data),content_type='application/json')
 
-    def test_member_isolation_on_all_read_paths(self):
-        own=record_payment(self.payload,self.secretary)
-        other=record_payment({**self.payload,'member_id':self.other.pk,'request_key':str(uuid4())},self.secretary)
-        self.client.force_login(self.reader)
-        self.assertEqual(len(self.client.get('/api/overview/?month=2026-09').json()['members']),1)
-        self.assertEqual(self.client.get(f'/api/members/{self.other.pk}/').status_code,404)
-        self.assertEqual(self.client.get(f'/receipts/{other.pk}/').status_code,404)
-        self.assertEqual(self.client.get(f'/receipts/{own.pk}/').status_code,200)
-        self.assertEqual(len(self.client.get('/api/payments/').json()['payments']),1)
-        self.assertNotIn('Other',self.client.get('/export/?month=2026-09').content.decode())
-        self.assertEqual(self.post('/api/payments/',self.payload).status_code,403)
-        self.assertEqual(self.client.get('/api/accounts/').status_code,403)
-        self.assertEqual(self.client.get('/api/audit/').status_code,403)
+    def test_members_are_records_and_never_accounts(self):
+        # A member is a row in the organization, not a login.
+        self.assertEqual(Member.objects.count(),2)
+        self.assertFalse(User.objects.filter(email__endswith='@example.com').exclude(email__in=['sec@example.com','auditor@example.com']).exists())
+        self.assertFalse(hasattr(self.member,'user'))
+        roles={choice[0] for choice in UserAccess._meta.get_field('role').choices}
+        self.assertNotIn('member',roles)
+        # No route may mint a member account.
+        self.assertEqual(self.post('/api/accounts/',{'username':'m1','email':'m1@example.com','password':'An-Excellent-Private-Phrase!','role':'member','member_id':self.member.pk}).status_code,400)
+        self.assertFalse(User.objects.filter(username='m1').exists())
+        # Public signup only ever creates secretary access.
+        visitor=Client()
+        response=visitor.post('/signup/',{'username':'fresh','email':'fresh@example.com','password1':'Another-Strong-Phrase-42!','password2':'Another-Strong-Phrase-42!','organization_name':'Fresh Association'})
+        self.assertEqual(response.status_code,302,response.content[:300])
+        self.assertEqual(User.objects.get(username='fresh').access.role,'secretary')
 
     def test_auditor_read_only(self):
         self.client.force_login(self.auditor)
@@ -83,12 +83,15 @@ class OperationalTests(TestCase):
 
     def test_excel_is_scoped_and_formula_safe(self):
         self.member.full_name='=SUM(1,2)';self.member.save()
-        self.client.force_login(self.reader)
+        self.client.force_login(self.auditor)
         response=self.client.get('/export/excel/?month=2026-09')
         book=load_workbook(io.BytesIO(response.content));sheet=book.active
-        self.assertEqual(sheet.max_row,2)
-        self.assertEqual(sheet['B2'].data_type,'s')
-        self.assertTrue(sheet['B2'].value.startswith("'="))
+        self.assertEqual(sheet.max_row,3)
+        cells=[sheet.cell(row=r,column=2).value for r in range(2,sheet.max_row+1)]
+        self.assertIn("'=SUM(1,2)",cells)
+        for row in range(2,sheet.max_row+1):
+            if sheet.cell(row=row,column=2).value=="'=SUM(1,2)":
+                self.assertEqual(sheet.cell(row=row,column=2).data_type,'s')
 
     def test_import_preview_commit_and_duplicate_prevention(self):
         file=SimpleUploadedFile('members.csv',b'name,joined\nImported Person,2026-09-01\n')
@@ -114,32 +117,35 @@ class OperationalTests(TestCase):
         self.assertEqual(row['status'],'Paid')
 
     def test_user_creation_validates_password_and_role(self):
-        data={'username':'newuser','email':'new@example.com','password':'short','role':'member','member_id':self.other.pk}
+        data={'username':'newuser','email':'new@example.com','password':'short','role':'auditor'}
         self.assertEqual(self.post('/api/accounts/',data).status_code,400)
         data['password']='An-Excellent-Private-Phrase!'
         self.assertEqual(self.post('/api/accounts/',data).status_code,201)
         new=User.objects.get(username='newuser')
         self.assertFalse(new.is_superuser)
-        self.assertEqual(new.access.member,self.other)
+        # A secretary cannot be minted here; they must accept an invitation.
+        self.assertEqual(self.post('/api/accounts/',{'username':'sec2','email':'sec2@example.com','password':'An-Excellent-Private-Phrase!','role':'secretary'}).status_code,400)
+        self.assertFalse(User.objects.filter(username='sec2').exists())
+        self.assertIsNone(new.access.member)
         self.assertNotIn(data['password'],''.join(AuditEvent.objects.values_list('details',flat=True)))
 
     def test_disabling_user_blocks_existing_session(self):
-        self.assertEqual(self.post(f'/api/accounts/{self.reader.pk}/disable/',{}).status_code,200)
-        self.client.force_login(self.reader)
+        self.assertEqual(self.post(f'/api/accounts/{self.auditor.pk}/disable/',{}).status_code,200)
+        self.client.force_login(self.auditor)
         self.assertEqual(self.client.get('/api/overview/').status_code,403)
         self.assertEqual(self.post(f'/api/accounts/{self.secretary.pk}/disable/',{}).status_code,403)
 
     def test_password_recovery_and_throttle(self):
         self.client.logout()
-        self.client.post('/account/reset/',{'email':'member@example.com'})
+        self.client.post('/account/reset/',{'email':'auditor@example.com'})
         self.assertEqual(len(mail.outbox),1)
-        self.client.post('/account/reset/',{'email':'member@example.com'})
+        self.client.post('/account/reset/',{'email':'auditor@example.com'})
         self.assertEqual(len(mail.outbox),1)
 
     def test_login_locks_after_failed_attempts(self):
         self.client.logout()
-        for _ in range(5):self.client.post('/login/',{'username':'member','password':'wrong'})
-        response=self.client.post('/login/',{'username':'member','password':'A-Fresh-Strong-Password!'})
+        for _ in range(5):self.client.post('/login/',{'username':'auditor','password':'wrong'})
+        response=self.client.post('/login/',{'username':'auditor','password':'A-Fresh-Strong-Password!'})
         self.assertEqual(response.status_code,429)
 
     def test_security_headers(self):
@@ -176,7 +182,7 @@ class OperationalTests(TestCase):
         self.assertEqual(workbook['Summary']['B4'].data_type, 's')
         self.assertEqual(workbook['Payments'].max_row, 1)
         self.assertEqual(self.client.get('/api/members/999999/report/').status_code, 404)
-        for user in [self.reader, self.auditor]:
+        for user in [self.auditor]:
             self.client.force_login(user)
             self.assertEqual(self.client.get(url).status_code, 403)
         self.client.logout()

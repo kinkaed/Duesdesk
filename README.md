@@ -36,7 +36,7 @@ Optional Vite development server: start the Django server first, then run `pnpm 
 - One payment and one printable/PDF-save receipt; member name snapshots preserve original receipt identity.
 - Void with a reason; original records remain visible and balances recalculate.
 - Monthly collections, covered dues, monthly balances and cumulative arrears.
-- Secretary, auditor and member roles enforced on the server; members see only their own data.
+- Secretary and auditor roles enforced on the server. Members are records, not accounts: they have no login and see nothing themselves.
 - Organization signup, single-use secretary invitations, safe handover/leave, and immediate access revocation.
 - Organization logo upload, extracted editable colors, and contrast-safe dynamic themes.
 - Password changes, recovery email and login lockouts.
