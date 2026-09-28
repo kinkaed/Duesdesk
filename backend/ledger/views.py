@@ -38,6 +38,15 @@ logger = logging.getLogger(__name__)
 # as a createsuperuser awaiting assignment or access that has been withdrawn.
 NO_ACCESS = 'Your account has no active organization access. Contact your organization secretary or an administrator.'
 
+def _constraint_name(error):
+    """Pull the violated constraint out of a database error, if the driver says."""
+    for attribute in ('__cause__', '__context__'):
+        cause = getattr(error, attribute, None)
+        diag = getattr(cause, 'diag', None)
+        if diag and getattr(diag, 'constraint_name', None):
+            return diag.constraint_name
+    return None
+
 def api(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
@@ -61,8 +70,12 @@ def api(view):
         except (ValueError, TypeError, ValidationError, Member.DoesNotExist, Payment.DoesNotExist) as error:
             message = '; '.join(error.messages) if isinstance(error, ValidationError) else str(error)
             return JsonResponse({'error': message or 'Check the entered values.'}, status=400)
-        except IntegrityError:
-            return JsonResponse({'error': 'A conflicting record already exists. Refresh and try again.'}, status=409)
+        except IntegrityError as error:
+            # Never swallow this silently: the generic 409 gave no way to find the
+            # cause. Log the full traceback and report the constraint that broke.
+            logger.exception('IntegrityError in %s', view.__name__)
+            constraint=_constraint_name(error)
+            return JsonResponse({'error': 'A conflicting record already exists. Refresh and try again.', 'detail': f'{view.__name__} violates {constraint}.' if constraint else f'{view.__name__} raised a database conflict.'}, status=409)
     return wrapped
 
 def secretary_only(request):
@@ -294,10 +307,23 @@ def disable_account(request,pk):
     with transaction.atomic():
         user=get_object_or_404(User.objects.filter(access__organization=organization_for(request.user)).select_for_update(),pk=pk)
         if user.is_superuser and not request.user.is_superuser:raise ValueError('Only a superuser can disable a superuser.')
-        access=user.access;access.active=False;access.save(update_fields=['active'])
+        access=user.access
+        # Disabling is idempotent. A double click, a retry or a refresh replays the
+        # same POST; it must not write a second audit event or fail.
+        if not access.active:
+            logger.info('account.disable no-op: %s is already disabled',user.username)
+            return JsonResponse({'ok':True,'already_disabled':True})
+        # Never leave an organization with nobody who can run it.
+        if access.role=='secretary' and not UserAccess.objects.filter(organization=access.organization,role='secretary',active=True).exclude(pk=access.pk).exists():
+            raise ValueError('This is the last active secretary. Invite another secretary before disabling this one.')
+        access.active=False;access.save(update_fields=['active'])
+        # Clear the auth flag too. Leaving is_active True meant a disabled account
+        # still passed authenticate() and could hold a live Django session.
+        if user.is_active:
+            user.is_active=False;user.save(update_fields=['is_active'])
         SecretaryInvite.objects.filter(organization=access.organization,created_by=user,used_at__isnull=True,revoked_at__isnull=True).update(revoked_at=timezone.now())
         audit(request.user,'account.disabled',user)
-    return JsonResponse({'ok':True})
+    return JsonResponse({'ok':True,'already_disabled':False})
 
 @api
 @require_GET

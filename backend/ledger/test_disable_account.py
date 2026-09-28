@@ -1,0 +1,113 @@
+from io import StringIO
+import uuid
+
+from django.contrib.auth.models import User
+from django.core.management import call_command
+from django.test import Client, TestCase, override_settings
+from django.utils import timezone
+
+from .models import AuditEvent, Member, Organisation, Payment, UserAccess, Allocation, DuesMonth
+
+
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
+class DisableAccountTests(TestCase):
+    def setUp(self):
+        self.password='A-Very-Strong-Private-Phrase-42!'
+        self.client=Client()
+        self.client.post('/signup/',{'username':'founder','email':'founder@example.com','password1':self.password,'password2':self.password,'organization_name':'Disable Co'})
+        self.org=Organisation.objects.get(name='Disable Co')
+        self.founder=User.objects.get(username='founder')
+        self.target=User.objects.create_user('colleague',email='colleague@example.com',password=self.password)
+        self.access=UserAccess.objects.create(organization=self.org,user=self.target,role='secretary')
+        self.member=Member.objects.create(organization=self.org,full_name='Ama Mensah',joined=timezone.now().date())
+
+    def post(self,url,data=None):
+        return self.client.post(url,data or {},content_type='application/json')
+
+    def disable(self,user):
+        return self.post(f'/api/accounts/{user.pk}/disable/')
+
+    def record_payment(self):
+        month=DuesMonth.objects.create(organization=self.org,month=timezone.now().date().replace(day=1))
+        payment=Payment.objects.create(organization=self.org,member=self.member,amount_received=100,payment_date=timezone.now().date(),method='Cash',request_key=uuid.uuid4(),created_by=self.founder,member_name_snapshot=self.member.full_name)
+        Allocation.objects.create(organization=self.org,payment=payment,dues_month=month,amount=100)
+        return payment
+
+    def test_disable_active_secretary_succeeds(self):
+        response=self.disable(self.target)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['already_disabled'],False)
+        self.target.refresh_from_db()
+        self.access.refresh_from_db()
+        self.assertFalse(self.access.active)
+        self.assertFalse(self.target.is_active)
+
+    def test_disable_is_idempotent_on_repeat(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        second=self.disable(self.target)
+        self.assertEqual(second.status_code,200)
+        self.assertEqual(second.json()['already_disabled'],True)
+        # A double click must not spam the audit history with duplicate events.
+        self.assertEqual(AuditEvent.objects.filter(action='account.disabled',entity_id=str(self.target.pk)).count(),1)
+
+    def sign_in(self,username):
+        client=Client()
+        client.post('/login/',{'username':username,'password':self.password})
+        return client
+
+    def test_disabled_account_cannot_log_in_or_reach_data(self):
+        self.record_payment()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertFalse(self.target.__class__.objects.get(pk=self.target.pk).is_active)
+        fresh=self.sign_in('colleague')
+        # Login is refused outright, so there is no session to reach any data with.
+        self.assertEqual(fresh.get('/api/members/').status_code,401)
+        self.assertEqual(fresh.get('/api/overview/').status_code,401)
+
+    def test_history_survives_disable(self):
+        payment=self.record_payment()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertTrue(Payment.objects.filter(pk=payment.pk).exists())
+        self.assertEqual(payment.created_by_id,self.founder.pk)
+        self.assertTrue(AuditEvent.objects.filter(action='account.disabled').exists())
+        response=self.client.get('/api/audit/')
+        self.assertEqual(response.status_code,200)
+        self.assertIn('account.disabled',response.content.decode())
+
+    def test_cannot_disable_self(self):
+        self.assertEqual(self.disable(self.founder).status_code,400)
+        self.assertTrue(UserAccess.objects.get(user=self.founder).active)
+
+    def test_organization_can_never_be_left_without_a_secretary(self):
+        # Only an active secretary in the same organization may disable an account,
+        # and never themselves. So the final secretary always has a second lock
+        # against removal: nobody else is left who could press the button.
+        self.assertEqual(self.disable(self.target).status_code,200)
+        remaining=UserAccess.objects.filter(organization=self.org,role='secretary',active=True)
+        self.assertEqual([a.user.username for a in remaining],['founder'])
+        self.assertEqual(self.disable(self.founder).status_code,400)
+        self.assertEqual(UserAccess.objects.filter(organization=self.org,role='secretary',active=True).count(),1)
+
+    def test_cannot_disable_across_organizations(self):
+        other=Organisation.objects.create(name='Other Co')
+        stranger=User.objects.create_user('stranger',email='stranger@example.com',password=self.password)
+        UserAccess.objects.create(organization=other,user=stranger,role='secretary')
+        self.assertEqual(self.disable(stranger).status_code,404)
+        self.assertTrue(UserAccess.objects.get(user=stranger).active)
+
+    def test_auditor_cannot_disable(self):
+        auditor=User.objects.create_user('auditor',email='auditor@example.com',password=self.password)
+        UserAccess.objects.create(organization=self.org,user=auditor,role='auditor')
+        self.client.force_login(auditor)
+        self.assertEqual(self.disable(self.target).status_code,403)
+        self.assertTrue(UserAccess.objects.get(user=self.target).active)
+
+    def test_assign_access_restores_a_disabled_login(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.target.refresh_from_db()
+        self.assertFalse(self.target.is_active)
+        call_command('assign_access','colleague','--organization-id',str(self.org.pk),'--role','secretary',stdout=StringIO())
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.is_active)
+        self.assertTrue(UserAccess.objects.get(user=self.target).active)
+        self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)

@@ -132,7 +132,13 @@ class OperationalTests(TestCase):
     def test_disabling_user_blocks_existing_session(self):
         self.assertEqual(self.post(f'/api/accounts/{self.auditor.pk}/disable/',{}).status_code,200)
         self.client.force_login(self.auditor)
-        self.assertEqual(self.client.get('/api/overview/').status_code,403)
+        # Disabling clears is_active too, so the old session is dead outright (401)
+        # rather than a live session that merely fails a role check (403).
+        self.assertEqual(self.client.get('/api/overview/').status_code,401)
+        # A read-only auditor is still refused writes, checked with a live account.
+        self.auditor.is_active=True;self.auditor.save(update_fields=['is_active'])
+        self.auditor.access.active=True;self.auditor.access.save(update_fields=['active'])
+        self.client.force_login(self.auditor)
         self.assertEqual(self.post(f'/api/accounts/{self.secretary.pk}/disable/',{}).status_code,403)
 
     def test_password_recovery_and_throttle(self):

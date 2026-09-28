@@ -32,5 +32,10 @@ class Command(BaseCommand):
             user=user,
             defaults={'role': role, 'member': None, 'organization':org, 'active':True},
         )
+        # Disabling an account also clears the auth flag, so re-enabling has to put
+        # it back or the operator repairs access the user still cannot sign in with.
+        if not user.is_active:
+            user.is_active = True
+            user.save(update_fields=['is_active'])
         action = 'Created' if created else 'Updated'
         self.stdout.write(self.style.SUCCESS(f'{action} {role} access for {user.username} (access #{access.pk}).'))
