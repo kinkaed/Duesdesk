@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from datetime import timedelta
 from django.contrib.auth import login, logout
@@ -12,6 +13,8 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from django.core.validators import validate_email
 from .models import Organisation, UserAccess, SecretaryInvite
 from .access import organization_for, role_for
+
+logger = logging.getLogger(__name__)
 from .branding import DEFAULTS, branding_json, decode_logo, logo_token, read_logo_token, color
 from .forms import SignupForm
 from .services import audit
@@ -88,7 +91,11 @@ def signup(request):
             login(request,user,backend='django.contrib.auth.backends.ModelBackend')
             return redirect('/')
         except (ValueError,ValidationError) as error:form.add_error(None, str(error))
-        except IntegrityError:form.add_error(None,'This account or invitation has already been used. Please sign in or request a new invitation.')
+        except IntegrityError:
+            # This used to collapse every database conflict into one sentence with
+            # nothing in the log, which made signup failures undiagnosable.
+            logger.exception('IntegrityError during signup invite=%s', bool(token))
+            form.add_error(None,'This account or invitation has already been used. Please sign in or request a new invitation.')
     context={'form':form,'invite':invite,'organization_name':org_name,
              'palette':{k:request.POST.get(k,v) for k,v in DEFAULTS.items()},'logo_token':request.POST.get('logo_token','')}
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))

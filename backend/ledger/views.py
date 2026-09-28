@@ -38,14 +38,21 @@ logger = logging.getLogger(__name__)
 # as a createsuperuser awaiting assignment or access that has been withdrawn.
 NO_ACCESS = 'Your account has no active organization access. Contact your organization secretary or an administrator.'
 
-def _constraint_name(error):
-    """Pull the violated constraint out of a database error, if the driver says."""
+def _db_diagnostics(error):
+    """Pull the failing statement, table and constraint out of a database error.
+
+    The generic 409 gave no way to find the cause, so record everything the
+    driver knows. Returns a dict that is empty when the driver says nothing.
+    """
     for attribute in ('__cause__', '__context__'):
-        cause = getattr(error, attribute, None)
-        diag = getattr(cause, 'diag', None)
-        if diag and getattr(diag, 'constraint_name', None):
-            return diag.constraint_name
-    return None
+        diag = getattr(getattr(error, attribute, None), 'diag', None)
+        if diag is None:
+            continue
+        fields = ('constraint_name', 'table_name', 'column_name', 'message_primary', 'statement_position')
+        found = {name: getattr(diag, name, None) for name in fields if getattr(diag, name, None)}
+        if found:
+            return found
+    return {}
 
 def api(view):
     @wraps(view)
@@ -71,11 +78,13 @@ def api(view):
             message = '; '.join(error.messages) if isinstance(error, ValidationError) else str(error)
             return JsonResponse({'error': message or 'Check the entered values.'}, status=400)
         except IntegrityError as error:
-            # Never swallow this silently: the generic 409 gave no way to find the
-            # cause. Log the full traceback and report the constraint that broke.
-            logger.exception('IntegrityError in %s', view.__name__)
-            constraint=_constraint_name(error)
-            return JsonResponse({'error': 'A conflicting record already exists. Refresh and try again.', 'detail': f'{view.__name__} violates {constraint}.' if constraint else f'{view.__name__} raised a database conflict.'}, status=409)
+            # Never swallow this silently. The generic 409 on its own left no way
+            # to find the cause, so log the traceback plus everything the driver
+            # reports about the failing statement.
+            details=_db_diagnostics(error)
+            logger.exception('IntegrityError in %s db=%s %s', view.__name__, connection.vendor, details or 'no driver detail')
+            constraint=details.get('constraint_name')
+            return JsonResponse({'error': 'A conflicting record already exists. Refresh and try again.', 'detail': f'{view.__name__} violates {constraint}.' if constraint else f'{view.__name__} raised a database conflict.', 'constraint':constraint,'table':details.get('table_name')}, status=409)
     return wrapped
 
 def secretary_only(request):
@@ -303,13 +312,15 @@ def accounts(request):
 @require_http_methods(['POST'])
 def disable_account(request,pk):
     if not secretary_only(request):return HttpResponse(status=403)
-    if pk==request.user.pk:raise ValueError('You cannot disable your own account.')
+    # Checked before any database work so a self-disable can never half-apply.
+    if pk==request.user.pk:raise ValueError("You can't disable your own account. Ask another secretary to do it.")
+    logger.info('account.disable requested by=%s target=%s',request.user.username,pk)
     with transaction.atomic():
         user=get_object_or_404(User.objects.filter(access__organization=organization_for(request.user)).select_for_update(),pk=pk)
         if user.is_superuser and not request.user.is_superuser:raise ValueError('Only a superuser can disable a superuser.')
         access=user.access
-        # Disabling is idempotent. A double click, a retry or a refresh replays the
-        # same POST; it must not write a second audit event or fail.
+        # Writes: ledger_useraccess (active), auth_user (is_active),
+        # ledger_secretaryinvite (revoked_at), ledger_auditevent (insert).
         if not access.active:
             logger.info('account.disable no-op: %s is already disabled',user.username)
             return JsonResponse({'ok':True,'already_disabled':True})

@@ -3,7 +3,8 @@ import uuid
 
 from django.contrib.auth.models import User
 from django.core.management import call_command
-from django.test import Client, TestCase, override_settings
+from django.db import connection
+from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import AuditEvent, Member, Organisation, Payment, UserAccess, Allocation, DuesMonth
@@ -74,9 +75,23 @@ class DisableAccountTests(TestCase):
         self.assertEqual(response.status_code,200)
         self.assertIn('account.disabled',response.content.decode())
 
+    def test_no_write_reuses_a_fixed_key(self):
+        # Every write must target an existing row or insert a fresh one. A fixed or
+        # reused key is what produces a unique violation, so assert none exist.
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.access.refresh_from_db()
+        # auth_user is updated in place by primary key, never re-inserted.
+        self.assertEqual(User.objects.filter(pk=self.target.pk).count(),1)
+        self.assertFalse(User.objects.get(pk=self.target.pk).is_active)
+        # The audit event is a single fresh insert.
+        self.assertEqual(AuditEvent.objects.filter(action='account.disabled').count(),1)
+
     def test_cannot_disable_self(self):
-        self.assertEqual(self.disable(self.founder).status_code,400)
+        response=self.disable(self.founder)
+        self.assertEqual(response.status_code,400)
+        self.assertIn("You can't disable your own account",response.json()['error'])
         self.assertTrue(UserAccess.objects.get(user=self.founder).active)
+        self.assertTrue(User.objects.get(pk=self.founder.pk).is_active)
 
     def test_organization_can_never_be_left_without_a_secretary(self):
         # Only an active secretary in the same organization may disable an account,
@@ -111,3 +126,34 @@ class DisableAccountTests(TestCase):
         self.assertTrue(self.target.is_active)
         self.assertTrue(UserAccess.objects.get(user=self.target).active)
         self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)
+
+
+class DisableUnderUserMemberConstraintTests(TransactionTestCase):
+    """Runs outside a wrapping transaction so it can add and drop a real index."""
+
+    reset_sequences = False
+
+    def setUp(self):
+        self.password = 'A-Very-Strong-Private-Phrase-42!'
+        self.client = Client()
+        self.client.post('/signup/', {'username': 'founder', 'email': 'founder@example.com', 'password1': self.password, 'password2': self.password, 'organization_name': 'Constraint Co'})
+        self.org = Organisation.objects.get(name='Constraint Co')
+        self.founder = User.objects.get(username='founder')
+        self.target = User.objects.create_user('colleague', email='colleague@example.com', password=self.password)
+        self.access = UserAccess.objects.create(organization=self.org, user=self.target, role='secretary')
+
+    def test_disable_survives_a_unique_constraint_on_user_and_member(self):
+        # Production reportedly carries a unique constraint on
+        # ledger_useraccess(user_id, member_id). Reproduce it exactly, then confirm
+        # the disable still succeeds, proving the path never collides on it.
+        with connection.cursor() as cursor:
+            cursor.execute('CREATE UNIQUE INDEX uq_useraccess_user_member ON ledger_useraccess (user_id, member_id)')
+        try:
+            response = self.client.post(f'/api/accounts/{self.target.pk}/disable/', {}, content_type='application/json')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['already_disabled'], False)
+            self.access.refresh_from_db()
+            self.assertFalse(self.access.active)
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute('DROP INDEX IF EXISTS uq_useraccess_user_member')
