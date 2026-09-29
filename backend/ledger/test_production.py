@@ -1,17 +1,24 @@
 from .models import Organisation, UserAccess
 import io
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from datetime import date
 from decimal import Decimal
 from uuid import uuid4
+from unittest.mock import patch
 from django.test import TestCase, Client, override_settings
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.utils import timezone
 from django.core import mail
 from openpyxl import load_workbook
 from .models import Member, UserAccess, Payment, AuditEvent, ImportBatch
-from .services import record_payment, void_payment
+from .services import next_month, parse_month, record_payment, report_horizon, void_payment
 from .views import member_rows
+from . import views as ledger_views
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend', STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
 class OperationalTests(TestCase):
@@ -193,3 +200,158 @@ class OperationalTests(TestCase):
             self.assertEqual(self.client.get(url).status_code, 403)
         self.client.logout()
         self.assertEqual(self.client.get(url).status_code, 401)
+
+    def test_denied_json_endpoints_return_a_readable_error(self):
+        # A bare 403 left the SPA unable to parse a body at all, so every
+        # role-gated JSON endpoint must answer with the api() error shape.
+        self.client.force_login(self.auditor)
+        denied = ['/api/settings/', '/api/accounts/', '/api/import/template/', '/api/invites/',
+                  f'/api/members/{self.member.pk}/report/']
+        for url in denied:
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 403, url)
+            self.assertEqual(response['Content-Type'], 'application/json', url)
+            self.assertTrue(response.json()['error'], url)
+        # Not @api-decorated, so it carries its own role check.
+        response = self.post('/api/branding/preview/', {})
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(response.json()['error'])
+
+    def test_unknown_report_kind_is_rejected_not_silently_balances(self):
+        default = self.client.get('/export/?month=2026-09')
+        self.assertEqual(default.status_code, 200)
+        self.assertIn(b'Member ID', default.content)
+        payments = self.client.get('/export/?month=2026-09&kind=payments')
+        self.assertEqual(payments.status_code, 200)
+        self.assertIn(b'Receipt', payments.content)
+        unknown = self.client.get('/export/?month=2026-09&kind=arrears')
+        self.assertEqual(unknown.status_code, 400)
+        self.assertTrue(unknown.json()['error'])
+        self.assertEqual(self.client.get('/export/excel/?month=2026-09&kind=arrears').status_code, 400)
+
+    def test_replayed_payment_save_answers_ok_not_created(self):
+        first = self.post('/api/payments/', self.payload)
+        self.assertEqual(first.status_code, 201)
+        replay = self.post('/api/payments/', self.payload)
+        self.assertEqual(replay.status_code, 200)
+        # Same payment is reported, only the status changes. The amount string
+        # keeps its pre-existing formatting (in-memory vs stored 2dp Decimal).
+        self.assertEqual({k: v for k, v in replay.json().items() if k != 'amount'},
+                         {k: v for k, v in first.json().items() if k != 'amount'})
+        self.assertEqual(Decimal(replay.json()['amount']), Decimal(first.json()['amount']))
+        self.assertEqual(Payment.objects.count(), 1)
+        self.assertEqual(AuditEvent.objects.filter(action='payment.recorded').count(), 1)
+        # A changed payload under the same key stays a conflict, not a replay.
+        self.assertEqual(self.post('/api/payments/', {**self.payload, 'amount': '50'}).status_code, 400)
+
+    def test_serve_rejects_unknown_app_env_before_django_loads(self):
+        backend = Path(__file__).resolve().parent.parent
+        # Everything above the Django import is the guard, so this also pins the
+        # requirement that validation happens before settings are read.
+        guard = (backend / 'serve.py').read_text(encoding='utf-8').split('from django.core.wsgi')[0]
+
+        def check(value):
+            previous = os.environ.get('APP_ENV')
+            os.environ['APP_ENV'] = value
+            try:
+                namespace = {}
+                exec(compile(guard, 'serve.py', 'exec'), namespace)
+                return namespace['validate_app_env'](os.environ['APP_ENV'])
+            finally:
+                if previous is None:
+                    os.environ.pop('APP_ENV', None)
+                else:
+                    os.environ['APP_ENV'] = previous
+
+        # A wrongly cased value is normalized, not silently treated as local.
+        self.assertEqual(check('production'), 'production')
+        self.assertEqual(check('  Production  '), 'production')
+        self.assertEqual(check('local'), 'local')
+        for bad in ['prod', 'staging', '', 'produciton', 'production2']:
+            with self.assertRaises(SystemExit):
+                check(bad)
+        # The real entrypoint exits with the message instead of serving.
+        result = subprocess.run([sys.executable, 'serve.py'], cwd=backend, capture_output=True, text=True,
+                                timeout=60, env={**os.environ, 'APP_ENV': 'prod'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('APP_ENV must be one of', result.stderr + result.stdout)
+
+    def test_render_lifecycle_runs_migrations_only_before_deploy(self):
+        # Read as text: the project takes no YAML dependency for its own tests.
+        spec = (Path(__file__).resolve().parent.parent.parent / 'render.yaml').read_text(encoding='utf-8')
+
+        def field(name):
+            return next(line for line in spec.splitlines() if line.strip().startswith(f'{name}:'))
+
+        # Migrations must not run during the build: every build would migrate.
+        self.assertNotIn('migrate', field('buildCommand'))
+        self.assertIn('verify_static', field('buildCommand'))
+        pre = field('preDeployCommand')
+        self.assertIn('migrate --noinput', pre)
+        self.assertIn('deployment_check', pre)
+        self.assertEqual(field('startCommand').split(':', 1)[1].strip(), 'cd backend && python serve.py')
+
+    def test_read_only_post_skips_the_organization_write_lock(self):
+        body = {'member_id': self.member.pk, 'amount': '50', 'start_month': '2026-09'}
+        self.assertTrue(ledger_views.payment_preview.read_only)
+        self.assertFalse(getattr(ledger_views.payments, 'read_only', False))
+        with patch('ledger.views.Organisation.objects.select_for_update') as locked:
+            preview = self.post('/api/payments/preview/', body)
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(len(preview.json()['allocations']), 2)
+        self.assertFalse(locked.called, 'a read-only POST must not take the write lock')
+        # Recording a payment still serializes on the organization row.
+        with patch('ledger.views.Organisation.objects.select_for_update') as locked:
+            self.assertEqual(self.post('/api/payments/', self.payload).status_code, 201)
+        self.assertTrue(locked.called, 'record_payment must keep its lock')
+        # Role denial for a read-only endpoint is unchanged.
+        self.client.force_login(self.auditor)
+        self.assertEqual(self.post('/api/payments/preview/', body).status_code, 403)
+
+    def test_report_month_is_bounded_by_organization_data(self):
+        today = timezone.localdate().replace(day=1)
+        covered = next_month(next_month(next_month(today)))
+        beyond = next_month(covered)
+        # Dates the user types into records keep the original wide range.
+        self.assertEqual(parse_month('2100-12'), date(2100, 12, 1))
+        self.assertEqual(report_horizon(self.org), today)
+        for url in ['/api/overview/', '/export/', f'/api/members/{self.member.pk}/report/']:
+            self.assertEqual(self.client.get(f'{url}?month={beyond:%Y-%m}').status_code, 400, url)
+        refused = self.client.get('/api/overview/?month=2100-12')
+        self.assertIn('Reports are available up to', refused.json()['error'])
+        self.assertEqual(self.client.get(f'/api/overview/?month={today:%Y-%m}').status_code, 200)
+        # The horizon grows with the organization's own data, not a fixed date.
+        record_payment({**self.payload, 'start_month': f'{today:%Y-%m}',
+                        'payment_date': f'{today:%Y-%m}-01', 'request_key': str(uuid4())}, self.secretary)
+        self.assertEqual(report_horizon(self.org), covered)
+        self.assertEqual(self.client.get(f'/api/overview/?month={covered:%Y-%m}').status_code, 200)
+        self.assertEqual(self.client.get(f'/api/overview/?month={beyond:%Y-%m}').status_code, 400)
+
+    def test_member_report_uses_the_requested_month(self):
+        url = f'/api/members/{self.member.pk}/report/'
+        today = timezone.localdate().replace(day=1)
+        tail = next_month(next_month(next_month(next_month(today))))
+        # A future last billable month is organization data, so it sets the horizon
+        # the report is allowed to reach.
+        self.member.billing_end = tail.replace(day=28)
+        self.member.save(update_fields=['billing_end'])
+        self.assertEqual(report_horizon(self.org), tail)
+
+        def summary(month):
+            return dict(load_workbook(io.BytesIO(self.client.get(f'{url}?month={month:%Y-%m}').content))['Summary'].values)
+
+        # Nothing paid yet: arrears cover every month up to the selected one.
+        self.assertEqual(summary(today)['Outstanding through ' + today.strftime('%B %Y')], 25)
+        self.assertEqual(summary(tail)['Outstanding through ' + tail.strftime('%B %Y')], 125)
+        self.assertIn('through ' + tail.strftime('%B %Y'), summary(tail)['Report coverage'])
+        # A payment covering later months is still reported for an earlier month.
+        record_payment({**self.payload, 'start_month': f'{today:%Y-%m}',
+                        'payment_date': f'{today:%Y-%m}-01', 'request_key': str(uuid4())}, self.secretary)
+        book = load_workbook(io.BytesIO(self.client.get(f'{url}?month={today:%Y-%m}').content))
+        self.assertEqual(book['Payments'].max_row, 2)
+        self.assertEqual(book['Months covered'].max_row, 5)
+        self.assertEqual(dict(book['Summary'].values)['Outstanding through ' + today.strftime('%B %Y')], 0)
+        # The filename contract is unchanged: it carries the generation date.
+        response = self.client.get(f'{url}?month={tail:%Y-%m}')
+        self.assertIn(f'filename="{self.member.code}-payment-report-{timezone.localdate().isoformat()}.xlsx"',
+                      response['Content-Disposition'])

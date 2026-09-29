@@ -6,7 +6,8 @@ services:
     rootDir: .
     region: frankfurt
     healthCheckPath: /health/
-    buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static && python backend/manage.py migrate --noinput
+    buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static
+    preDeployCommand: python backend/manage.py migrate --noinput && python backend/manage.py deployment_check
     startCommand: cd backend && python serve.py
     envVars:
       - key: APP_ENV

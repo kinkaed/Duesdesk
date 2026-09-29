@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from .branding import DEFAULTS, branding_json, decode_logo, logo_token, read_logo_token, color
 from .forms import SignupForm
 from .services import audit
-from .views import api, body
+from .views import api, body, READ_ONLY
 
 
 def token_hash(raw):
@@ -40,7 +40,7 @@ def preview_owner(request):
 @require_POST
 def logo_preview(request):
     if request.user.is_authenticated and role_for(request.user) != 'secretary':
-        return HttpResponse(status=403)
+        return JsonResponse({'error': READ_ONLY}, status=403)
     try:
         raw, palette = decode_logo(request.FILES.get('logo'))
         return JsonResponse({'logo_token':logo_token(raw,preview_owner(request)), **palette})
@@ -105,7 +105,7 @@ def signup(request):
 @api
 @require_http_methods(['GET','POST'])
 def invites(request):
-    if role_for(request.user)!='secretary':return HttpResponse(status=403)
+    if role_for(request.user)!='secretary':return JsonResponse({'error': READ_ONLY},status=403)
     org=organization_for(request.user)
     if request.method=='GET':
         rows=SecretaryInvite.objects.filter(organization=org).order_by('-id')[:100]

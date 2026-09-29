@@ -4,7 +4,7 @@ from uuid import UUID
 import hashlib
 import json
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Max, Sum
 from django.utils import timezone
 from .models import Member, Payment, DuesMonth, Allocation, AuditEvent, Organisation
 
@@ -26,6 +26,36 @@ def parse_month(value):
     if not 2000 <= result.year <= 2100:
         raise ValueError('Choose a month between 2000 and 2100.')
     return result
+
+def _month_start(value):
+    return value.replace(day=1) if value else None
+
+def report_horizon(org):
+    """The latest month an organization can meaningfully report on.
+
+    Anchored to the organization's own data rather than a fixed far-future
+    ceiling, so a stray reporting month cannot walk every member's arrears from
+    the month they joined all the way to an arbitrary date.
+    """
+    today = timezone.localdate().replace(day=1)
+    if not org:
+        return today
+    latest_dues = DuesMonth.objects.filter(organization=org).order_by('-month').values_list('month', flat=True).first()
+    bounds = Member.objects.filter(organization=org).aggregate(joined=Max('joined'), billing_end=Max('billing_end'))
+    bounds = [_month_start(latest_dues), _month_start(bounds['joined']), _month_start(bounds['billing_end'])]
+    return max([today, *[b for b in bounds if b]])
+
+def parse_report_month(value, org=None):
+    """Validate a reporting month against the organization's data horizon.
+
+    Deliberately separate from parse_month, which validates payment and member
+    dates the user types and must keep its wider accepted range.
+    """
+    month = parse_month(value)
+    horizon = report_horizon(org)
+    if month > horizon:
+        raise ValueError(f'Reports are available up to {horizon:%B %Y}.')
+    return month
 
 def parse_amount(value):
     try:
@@ -60,7 +90,8 @@ def plan_payment(member, amount, month):
     raise ValueError('This payment spans too many months. Choose a later starting month.')
 
 @transaction.atomic
-def record_payment(data, user):
+def record_payment_result(data, user):
+    """Record a payment, reporting whether this save created it or replayed it."""
     try:
         key = UUID(str(data.get('request_key', '')))
         member_id = int(data.get('member_id', 0))
@@ -86,7 +117,7 @@ def record_payment(data, user):
     if existing:
         if existing.member_id != member.pk or existing.amount_received != amount or existing.created_by_id != user.pk or existing.request_fingerprint != fingerprint:
             raise ValueError('This save request has already been used. Reload and try again.')
-        return existing
+        return existing, False
     if data.get('method') not in dict(Payment._meta.get_field('method').choices):
         raise ValueError('Select a payment method.')
     plan = plan_payment(member, amount, month)
@@ -97,7 +128,10 @@ def record_payment(data, user):
         dues, _ = DuesMonth.objects.get_or_create(organization=org, month=item['month'], defaults={'amount_due': item['dues']})
         Allocation.objects.create(organization=org, payment=payment, dues_month=dues, amount=item['amount'])
     audit(user, 'payment.recorded', payment, {'amount': str(amount), 'member_id': member.pk, 'months': [p['month'] for p in plan]})
-    return payment
+    return payment, True
+
+def record_payment(data, user):
+    return record_payment_result(data, user)[0]
 
 @transaction.atomic
 def void_payment(pk, user, reason):

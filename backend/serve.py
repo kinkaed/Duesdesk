@@ -8,6 +8,22 @@ import os
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 
+ALLOWED_APP_ENVS = ('local', 'production')
+
+def validate_app_env(value):
+    """Normalize the environment name, or exit before Django is imported.
+
+    Settings compare APP_ENV against 'production' exactly, so a misspelled or
+    wrongly cased value would quietly start a public service with local
+    security settings. Catch that here, where the message is actionable.
+    """
+    name = str(value if value is not None else '').strip().lower()
+    if name not in ALLOWED_APP_ENVS:
+        raise SystemExit(f'APP_ENV must be one of {", ".join(ALLOWED_APP_ENVS)}; got {value!r}.')
+    return name
+
+os.environ['APP_ENV'] = validate_app_env(os.environ.get('APP_ENV', 'local'))
+
 from django.core.wsgi import get_wsgi_application
 
 application = get_wsgi_application()

@@ -27,7 +27,7 @@ from openpyxl.styles import Font, PatternFill
 from .forms import SignupForm
 from .models import Member, Payment, Allocation, DuesMonth, UserAccess, AuditEvent, Organisation, RecoveryAttempt, ImportBatch, SecretaryInvite
 from .access import role_for, visible_members, visible_payments, organization_for, membership
-from .services import RATE, next_month, parse_month, parse_amount, plan_payment, record_payment, void_payment, audit
+from .services import RATE, next_month, parse_month, parse_amount, parse_report_month, plan_payment, record_payment, record_payment_result, void_payment, audit
 
 from .branding import branding_json, color, read_logo_token
 
@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # no member login to reach it. It covers accounts with no active membership, such
 # as a createsuperuser awaiting assignment or access that has been withdrawn.
 NO_ACCESS = 'Your account has no active organization access. Contact your organization secretary or an administrator.'
+# Shared by api() and the per-view role checks below so every JSON 403 for an
+# insufficient role reads the same, instead of a zero-byte body.
+READ_ONLY = 'Your account is read-only.'
 
 def _db_diagnostics(error):
     """Pull the failing statement, table and constraint out of a database error.
@@ -54,6 +57,16 @@ def _db_diagnostics(error):
             return found
     return {}
 
+def read_only_post(view):
+    """Mark a POST view that only reads, so api() skips the organization write lock.
+
+    The lock in api() exists to serialize writes. Marking a genuinely read-only
+    POST keeps it from blocking every other writer in the organization, without
+    changing the authentication, CSRF or role checks that run before the lock.
+    """
+    view.read_only = True
+    return view
+
 def api(view):
     @wraps(view)
     def wrapped(request, *args, **kwargs):
@@ -63,9 +76,9 @@ def api(view):
         if not role:
             return JsonResponse({'error': NO_ACCESS}, status=403)
         if request.method not in ('GET','HEAD') and role != 'secretary':
-            return JsonResponse({'error': 'Your account is read-only.'}, status=403)
+            return JsonResponse({'error': READ_ONLY}, status=403)
         try:
-            if request.method not in ('GET', 'HEAD'):
+            if request.method not in ('GET', 'HEAD') and not getattr(view, 'read_only', False):
                 with transaction.atomic():
                     org = organization_for(request.user)
                     if not org:return JsonResponse({'error':'Your organization access has ended.'},status=403)
@@ -137,7 +150,7 @@ def session_info(request):
 @api
 @require_GET
 def overview(request):
-    month = parse_month(request.GET.get('month',timezone.localdate().strftime('%Y-%m')))
+    month = parse_report_month(request.GET.get('month',timezone.localdate().strftime('%Y-%m')),organization_for(request.user))
     rows = member_rows(month,request.user)
     due = [r for r in rows if r['status']!='Not due']
     records = visible_payments(request.user)
@@ -193,6 +206,7 @@ def member_detail(request,pk):
 
 @api
 @require_http_methods(['POST'])
+@read_only_post
 def payment_preview(request):
     data=body(request)
     member=visible_members(request.user).get(pk=int(data.get('member_id',0)))
@@ -206,8 +220,8 @@ def payments(request):
         page=max(1,int(request.GET.get('page',1)))
         items=visible_payments(request.user).select_related('member').prefetch_related('allocations__dues_month').order_by('-payment_date','-id')
         return JsonResponse({'payments':[payment_json(p) for p in items[(page-1)*100:page*100]],'page':page,'has_more':items.count()>page*100})
-    item=record_payment(body(request),request.user)
-    return JsonResponse({'id':item.pk,'receipt':item.receipt_number,'amount':str(item.amount_received)},status=201)
+    item,created=record_payment_result(body(request),request.user)
+    return JsonResponse({'id':item.pk,'receipt':item.receipt_number,'amount':str(item.amount_received)},status=201 if created else 200)
 
 @api
 @require_http_methods(['POST'])
@@ -225,8 +239,9 @@ def safe_cell(value):
     return "'"+value if value.lstrip().startswith(('=','+','-','@')) else value
 
 def report_data(request):
-    month=parse_month(request.GET.get('month',timezone.localdate().strftime('%Y-%m')))
+    month=parse_report_month(request.GET.get('month',timezone.localdate().strftime('%Y-%m')),organization_for(request.user))
     kind=request.GET.get('kind','balances')
+    if kind not in ('balances','payments'):raise ValueError('Choose a valid report type.')
     if kind=='payments':
         header=['Receipt','Member ID','Member','Received','Method','Amount GHS','Reference','Status','Void reason']
         payments=visible_payments(request.user).filter(payment_date__gte=month,payment_date__lt=next_month(month)).select_related('member').order_by('id')
@@ -267,7 +282,7 @@ def export_excel(request):
 @api
 @require_http_methods(['GET','POST'])
 def organisation_settings(request):
-    if not secretary_only(request):return HttpResponse(status=403)
+    if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
     item=organization_for(request.user)
     if request.method=='POST':
         with transaction.atomic():
@@ -283,7 +298,7 @@ def organisation_settings(request):
 @api
 @require_GET
 def audit_log(request):
-    if role_for(request.user) not in ('secretary','auditor'):return HttpResponse(status=403)
+    if role_for(request.user) not in ('secretary','auditor'):return JsonResponse({'error': NO_ACCESS},status=403)
     page=max(1,int(request.GET.get('page',1)))
     records=AuditEvent.objects.filter(organization=organization_for(request.user)).select_related('actor')
     return JsonResponse({'events':[{'id':e.pk,'date':e.created_at.isoformat(),'actor':e.actor.username if e.actor else 'System','action':e.action,'entity':e.entity,'entity_id':e.entity_id,'details':json.loads(e.details)} for e in records[(page-1)*100:page*100]],'page':page,'has_more':records.count()>page*100})
@@ -291,7 +306,7 @@ def audit_log(request):
 @api
 @require_http_methods(['GET','POST'])
 def accounts(request):
-    if not secretary_only(request):return HttpResponse(status=403)
+    if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
     if request.method=='GET':
         return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':role_for(u) or 'None','active':u.is_active and u.access.active} for u in User.objects.filter(access__organization=organization_for(request.user)).select_related('access').order_by('username')]})
     data=body(request)
@@ -311,7 +326,7 @@ def accounts(request):
 @api
 @require_http_methods(['POST'])
 def disable_account(request,pk):
-    if not secretary_only(request):return HttpResponse(status=403)
+    if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
     # Checked before any database work so a self-disable can never half-apply.
     if pk==request.user.pk:raise ValueError("You can't disable your own account. Ask another secretary to do it.")
     logger.info('account.disable requested by=%s target=%s',request.user.username,pk)
@@ -339,7 +354,7 @@ def disable_account(request,pk):
 @api
 @require_GET
 def import_template(request):
-    if not secretary_only(request):return HttpResponse(status=403)
+    if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
     kind=request.GET.get('kind','members')
     text='name,phone,email,joined,status,billing_end\nExample Member,0240000000,,2026-09-01,Active,\n' if kind=='members' else 'member_id,amount,start_month,payment_date,method,reference,notes\n1,100,2026-09,2026-09-22,Cash,,Example import\n'
     response=HttpResponse(text,content_type='text/csv');response['Content-Disposition']=f'attachment; filename="{kind}-template.csv"';return response
@@ -426,10 +441,12 @@ def health(request):
 def member_report(request, pk):
     """Secretary-requested statement: one receipt row, separate monthly allocations."""
     if not secretary_only(request):
-        return HttpResponse(status=403)
+        return JsonResponse({'error': READ_ONLY},status=403)
     member = get_object_or_404(visible_members(request.user), pk=pk)
     today = timezone.localdate()
-    current_month = today.replace(day=1)
+    # The report month drives outstanding dues and arrears; payment history and
+    # the filename stay complete and unchanged.
+    report_month = parse_report_month(request.GET.get('month', today.strftime('%Y-%m')), member.organization)
     payments = list(visible_payments(request.user).filter(member=member).prefetch_related('allocations__dues_month').order_by('payment_date', 'pk'))
     allocated = {}
     for payment in payments:
@@ -441,7 +458,7 @@ def member_report(request, pk):
     monthly_rows = []
     arrears = Decimal('0')
     cursor = member.joined.replace(day=1)
-    last_due = min(current_month, member.billing_end) if member.billing_end else current_month
+    last_due = min(report_month, member.billing_end) if member.billing_end else report_month
     last = max([last_due, *allocated.keys()])
     while cursor <= last:
         due = rates.get(cursor, RATE) if cursor <= last_due else Decimal('0')
@@ -461,8 +478,8 @@ def member_report(request, pk):
         ['Member ID', member.code], ['Member name', member.full_name],
         ['Generated on', today.isoformat()], ['Currency', 'GHS'],
         ['Total paid (excludes voids)', sum((p.amount_received for p in payments if not p.voided_at), Decimal('0'))],
-        ['Outstanding through ' + current_month.strftime('%B %Y'), arrears],
-        ['Report coverage', 'All recorded payments; outstanding dues through the current month'],
+        ['Outstanding through ' + report_month.strftime('%B %Y'), arrears],
+        ['Report coverage', 'All recorded payments; outstanding dues through ' + report_month.strftime('%B %Y')],
         ['Note', 'Voided payments are retained for reference and excluded from totals.'],
     ]:
         summary.append([(safe_cell(value) if isinstance(value, str) else value) for value in row])
