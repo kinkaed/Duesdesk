@@ -98,10 +98,17 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 WHITENOISE_USE_FINDERS = not PRODUCTION
-STORAGES = {'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'}}
+# Hashed manifest storage makes {% static %} depend on a collected staticfiles.json,
+# so a stale or uncollected manifest silently 404s the auth and receipt stylesheets.
+# Only production pays for the cache-busting hashes; local dev resolves names directly.
+STATICFILES_BACKEND = 'whitenoise.storage.CompressedManifestStaticFilesStorage' if PRODUCTION else 'django.contrib.staticfiles.storage.StaticFilesStorage'
+STORAGES = {'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND': STATICFILES_BACKEND}}
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = '/login/'
-LOGIN_REDIRECT_URL = '/'
+# A real page path, not '/'. In development the Vite base is '/static/app/', so a
+# redirect to '/' is answered at the base and the app ends up on a URL that is not
+# one of its pages: it renders, but a reload or a shared link loses the place.
+LOGIN_REDIRECT_URL = '/overview/'
 LOGOUT_REDIRECT_URL = '/login/'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
@@ -114,6 +121,16 @@ if RENDER_EXTERNAL_HOSTNAME:
     https_origin = f'https://{RENDER_EXTERNAL_HOSTNAME}'
     if https_origin not in origins:
         origins.append(https_origin)
+# In development the browser talks to the Vite dev server and Vite proxies the
+# request on, rewriting Host, so Django sees the request arriving from its own
+# origin while the browser's Origin header names the dev server. CSRF rejects
+# that mismatch with 403 on every form post, including signing in. The dev
+# origins are loopback-only and are never trusted in production, where the
+# browser and Django share a single origin and no extra entry is needed.
+if not PRODUCTION:
+    for dev_origin in csv_values(os.environ.get('DEV_TRUSTED_ORIGINS', 'http://127.0.0.1:5173,http://localhost:5173')):
+        if dev_origin not in origins:
+            origins.append(dev_origin)
 CSRF_TRUSTED_ORIGINS = origins
 SECURE_SSL_REDIRECT = PRODUCTION
 SECURE_HSTS_SECONDS = 31536000 if PRODUCTION else 0
