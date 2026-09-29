@@ -57,6 +57,9 @@ INSTALLED_APPS = [
     'ledger',
 ]
 MIDDLEWARE = [
+    # Outermost, so every request gets a correlation id: the redirect from
+    # SecurityMiddleware included.
+    'ledger.middleware.RequestCorrelationMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -137,7 +140,11 @@ SECURE_HSTS_SECONDS = 31536000 if PRODUCTION else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = PRODUCTION
 SECURE_HSTS_PRELOAD = PRODUCTION
 SECURE_REFERRER_POLICY = 'same-origin'
-if os.environ.get('TRUST_PROXY', '0') == '1':
+# One flag, read once. serve.py configures waitress from it, and
+# observability.proxy_trusted() reads the same value, so the audited client IP
+# and the proxy handling can never disagree about whether a proxy is trusted.
+TRUST_PROXY = os.environ.get('TRUST_PROXY', '0') == '1'
+if TRUST_PROXY:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 X_FRAME_OPTIONS = 'DENY'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2097152
@@ -151,4 +158,33 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', '1') == '1'
 EMAIL_TIMEOUT = 15
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Duesdesk <noreply@localhost>')
-LOGGING = {'version': 1, 'disable_existing_loggers': False, 'handlers': {'console': {'class': 'logging.StreamHandler'}}, 'root': {'handlers': ['console'], 'level': 'WARNING'}, 'loggers': {'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False}}}
+# Terminal logs are the main debugging surface, so local defaults favour
+# visibility: one access line per request, human readable, with the correlation
+# id inline. Production switches the formatter to JSON for aggregation and
+# raises the root level to INFO so application logs are not silently dropped.
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO' if PRODUCTION else 'INFO').upper()
+PLAIN_FORMAT = '%(asctime)s %(levelname)-7s %(name)-22s %(message)s [rid=%(request_id)s %(method)s %(path)s %(status)s %(duration_ms)sms actor=%(actor_id)s]'
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request_context': {'()': 'ledger.observability.RequestContextFilter'}},
+    'formatters': {
+        'plain': {'format': PLAIN_FORMAT},
+        'json': {'()': 'ledger.observability.JsonFormatter'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'json' if PRODUCTION else 'plain',
+            'filters': ['request_context'],
+        },
+    },
+    'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+    'loggers': {
+        'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False},
+        # CSRF failures and other security rejections are warnings worth seeing.
+        'django.security': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'axes': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        'ledger': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+    },
+}

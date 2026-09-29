@@ -116,18 +116,73 @@ class Organisation(models.Model):
     contact = models.CharField(max_length=200, blank=True)
     receipt_footer = models.CharField(max_length=250, default='Thank you for your contribution.')
 
+class AuditEventQuerySet(models.QuerySet):
+    """Audit rows are evidence, so they can be appended but never rewritten.
+
+    Ordinary application flows must not be able to quietly adjust a timestamp,
+    an actor or an outcome after the fact. Bulk update and delete are refused
+    here as well as on the instance, because a queryset is the easy way to
+    bypass a model-level guard.
+    """
+
+    def update(self, **kwargs):
+        raise ValidationError('Audit events cannot be modified.')
+
+    def delete(self):
+        raise ValidationError('Audit events cannot be deleted.')
+
+
 class AuditEvent(ScopedModel):
     tenant_relations = ()
-    organization = models.ForeignKey("Organisation", on_delete=models.PROTECT)
+    # Nullable only so that events which happen before authentication (a failed
+    # login, a lockout) can be recorded without inventing a user or an
+    # organization. Tenant queries filter on organization, so a null
+    # organization is simply never visible to any tenant. The audit() helper
+    # only allows it for the allowlist in observability.ANONYMOUS_ACTIONS.
+    organization = models.ForeignKey("Organisation", null=True, blank=True, on_delete=models.PROTECT)
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.PROTECT)
     action = models.CharField(max_length=60)
-    entity = models.CharField(max_length=30)
-    entity_id = models.CharField(max_length=40)
+    # success | failure | denied | rejected | replayed. Defaults to success so
+    # every pre-existing call site keeps its meaning without being rewritten.
+    outcome = models.CharField(max_length=10, choices=[(o, o) for o in ('success', 'failure', 'denied', 'rejected', 'replayed')], default='success')
+    # Why a non-success outcome happened, e.g. duplicate_idempotency_key.
+    reason = models.CharField(max_length=60, blank=True)
+    entity = models.CharField(max_length=30, blank=True)
+    entity_id = models.CharField(max_length=40, blank=True)
+    # Correlates the event with the technical log lines and any 500 for the
+    # same request. Null for events raised outside a request.
+    request_id = models.CharField(max_length=64, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=300, blank=True)
+    http_method = models.CharField(max_length=10, blank=True)
+    path = models.CharField(max_length=200, blank=True)
     details = models.TextField(default='{}')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
+    objects = AuditEventQuerySet.as_manager()
+
     class Meta:
         ordering = ['-id']
+        indexes = [
+            # Tenant timeline: everything for an organization, newest first.
+            models.Index(fields=['organization', '-created_at'], name='audit_org_created'),
+            # "Show me every payment event" over a period.
+            models.Index(fields=['action', '-created_at'], name='audit_action_created'),
+            # "What happened during request ABC123?"
+            models.Index(fields=['request_id'], name='audit_request_id'),
+            # "Everything that happened to member 42 last month."
+            models.Index(fields=['entity', 'entity_id', '-created_at'], name='audit_resource_created'),
+            # "Everything this user did."
+            models.Index(fields=['actor', '-created_at'], name='audit_actor_created'),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('Audit events cannot be modified.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('Audit events cannot be deleted.')
 
 class RecoveryAttempt(models.Model):
     key = models.CharField(max_length=64, unique=True)

@@ -9,11 +9,81 @@ from django.utils import timezone
 from .models import Member, Payment, DuesMonth, Allocation, AuditEvent, Organisation
 
 from .access import organization_for, role_for
+from .observability import ANONYMOUS_ACTIONS, OUTCOMES, current_context, safe_details
+from .observability import logger as obs_logger
 
 RATE = Decimal('25.00')
 
-def audit(user, action, obj, details=None):
-    return AuditEvent.objects.create(organization=organization_for(user), actor=user, action=action, entity=obj.__class__.__name__, entity_id=str(obj.pk), details=json.dumps(details or {}, default=str))
+_UNSET = object()
+
+def audit(user, action, obj=None, details=None, *, outcome='success', reason='', organization=_UNSET, resource='', resource_id='', record_http=True):
+    """Record one audit event, or record why it could not be recorded.
+
+    `organization` defaults to the actor's active organization. If the actor has
+    no active membership, the affected object's own organization is used, so an
+    event caused by a just-disabled account still lands with the tenant it
+    happened in rather than raising. Only the pre-auth allowlist in
+    observability may have no organization at all, and no user or organization
+    is ever invented to fill the column.
+
+    The insert runs inside a savepoint when the caller is already in a
+    transaction. A failed audit write is then rolled back on its own and the
+    surrounding business transaction stays usable, so a logging fault can never
+    turn a successful payment or member edit into a 500.
+
+    Nothing in here is allowed to raise. Resolving the organization, serializing
+    the details and the insert are all inside the guard, because the one call
+    site that must never fail is a login rejection: an exception from the audit
+    helper would replace a 400 with a 500 and hand an attacker a stack trace.
+    """
+    if outcome not in OUTCOMES:
+        # A wrong outcome is a programming error. Fail visibly in the technical
+        # log rather than recording a success that did not happen.
+        obs_logger.error('Unknown audit outcome %r for action %r', outcome, action)
+        outcome = 'failure'
+    actor = user if getattr(user, 'is_authenticated', False) else None
+    try:
+        if organization is _UNSET:
+            # organization_for() needs an authenticated user; a pre-auth event
+            # passes actor=None, so the lookup is skipped rather than crashed on.
+            organization = organization_for(actor) if actor is not None else None
+        if organization is None:
+            organization = getattr(obj, 'organization', None)
+        if organization is None and action not in ANONYMOUS_ACTIONS:
+            # Preserving "a null organization means pre-auth" is what keeps tenant
+            # queries from ever mixing in an unrelated event. Send it to the
+            # technical log, where a developer will see it, instead of writing a
+            # row that no tenant could read.
+            obs_logger.error('Refusing tenant audit event %r with no organization (actor=%s)', action, getattr(actor, 'username', None))
+            return None
+        entity = resource or (obj.__class__.__name__ if obj is not None else '')
+        identity = resource_id or (str(obj.pk) if obj is not None and getattr(obj, 'pk', None) else '')
+        context = current_context()
+        fields = {
+            'organization': organization,
+            'actor': actor,
+            'action': action,
+            'outcome': outcome,
+            'reason': str(reason)[:60],
+            'entity': entity[:30],
+            'entity_id': identity[:40],
+            'request_id': ((context.request_id if context else '') or '')[:64],
+            'details': safe_details(details),
+        }
+        if context:
+            fields['ip_address'] = context.ip_address
+            fields['user_agent'] = (context.user_agent or '')[:300]
+            if record_http:
+                fields['http_method'] = (context.method or '')[:10]
+                fields['path'] = (context.path or '')[:200]
+        with transaction.atomic():
+            return AuditEvent.objects.create(**fields)
+    except Exception:
+        # Deliberately swallowed: the audit trail must not be able to fail an
+        # otherwise valid request. The exception is kept in the technical log
+        # with the same request id, so it is still investigable.
+        obs_logger.exception('Failed to record audit event %s', action)
+        return None
 
 def next_month(value):
     return date(value.year + (value.month == 12), value.month % 12 + 1, 1)
@@ -89,6 +159,23 @@ def plan_payment(member, amount, month):
         month = next_month(month)
     raise ValueError('This payment spans too many months. Choose a later starting month.')
 
+class PaymentRejected(ValueError):
+    """A request refused on the grounds that it duplicates an earlier one.
+
+    Carries what the audit event needs, but does not write it here: this is
+    raised from inside the payment transaction, so an event written now would be
+    rolled back along with the refusal and never exist. The caller records it
+    after the transaction has ended, then re-raises this to produce the 400.
+    """
+
+    def __init__(self, message, *, action, reason, details, obj=None):
+        super().__init__(message)
+        self.action = action
+        self.reason = reason
+        self.details = details
+        self.obj = obj
+
+
 @transaction.atomic
 def record_payment_result(data, user):
     """Record a payment, reporting whether this save created it or replayed it."""
@@ -116,7 +203,18 @@ def record_payment_result(data, user):
     existing = Payment.objects.filter(organization=org, request_key=key).first()
     if existing:
         if existing.member_id != member.pk or existing.amount_received != amount or existing.created_by_id != user.pk or existing.request_fingerprint != fingerprint:
-            raise ValueError('This save request has already been used. Reload and try again.')
+            # The same idempotency key carrying a different body: a client retry
+            # that changed its payload, or two callers colliding on one key.
+            # Worth an event even though the caller still gets the original
+            # payment's error, because a pattern of these is a real signal.
+            raise PaymentRejected(
+                'This save request has already been used. Reload and try again.',
+                action='payment.replayed', reason='request_key_conflict',
+                details={'request_key': str(key), 'member_id': member.pk, 'amount': str(amount)},
+                obj=existing,
+            )
+        # An identical retry. Not an event in its own right: a double click must
+        # not manufacture a second payment record in the history.
         return existing, False
     if data.get('method') not in dict(Payment._meta.get_field('method').choices):
         raise ValueError('Select a payment method.')
