@@ -209,7 +209,11 @@ class OperationalTests(TestCase):
         workbook = load_workbook(io.BytesIO(self.client.get(url).content))
         self.assertEqual(dict(workbook['Summary'].values)['Total paid (excludes voids)'], 0)
         self.assertEqual(workbook['Payments']['F2'].value, 'VOID')
-        self.assertTrue(AuditEvent.objects.filter(action='member.report_exported', entity_id=str(self.member.pk)).exists())
+        # The action name is part of the contract the audit history reports on, so
+        # the rename from member.report_exported is asserted rather than assumed:
+        # the old spelling must no longer be written.
+        self.assertTrue(AuditEvent.objects.filter(action='member.export.generated', entity_id=str(self.member.pk)).exists())
+        self.assertFalse(AuditEvent.objects.filter(action='member.report_exported').exists())
 
     def test_member_report_access_empty_and_formula_safety(self):
         url = f'/api/members/{self.member.pk}/report/'
