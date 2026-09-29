@@ -4,6 +4,9 @@ from ledger import views, organization_views as org_views
 
 urlpatterns = [
     path('', views.home),
+    # The profile page is the same application shell. Reusing views.home keeps a
+    # single set of login and membership checks instead of a parallel copy.
+    path('profile/', views.home, name='profile'),
     path('api/session/', views.session_info),
     path('login/', auth.LoginView.as_view(), name='login'),
     path('logout/', auth.LogoutView.as_view()),
