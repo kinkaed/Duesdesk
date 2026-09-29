@@ -10,6 +10,8 @@ from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import patch
 from django.test import TestCase, Client, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.db import connection
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
@@ -135,6 +137,28 @@ class OperationalTests(TestCase):
         self.assertFalse(User.objects.filter(username='sec2').exists())
         self.assertIsNone(new.access.member)
         self.assertNotIn(data['password'],''.join(AuditEvent.objects.values_list('details',flat=True)))
+
+    def test_accounts_list_keeps_disabled_role_and_does_not_scale_queries(self):
+        # A disabled account must still report the role it holds, otherwise a
+        # secretary cannot tell what access they would be restoring.
+        self.assertEqual(self.post(f'/api/accounts/{self.auditor.pk}/disable/',{}).status_code,200)
+        users={u['username']:u for u in self.client.get('/api/accounts/').json()['users']}
+        self.assertEqual(users['auditor']['role'],'auditor')
+        self.assertFalse(users['auditor']['active'])
+        self.assertEqual(users['sec']['role'],'secretary')
+        self.assertTrue(users['sec']['active'])
+        # The role must come from the joined access row, so the list has to cost the
+        # same whatever the size of the organization. A per-user membership() lookup
+        # would pass the assertions above while still querying once per account.
+        def account_queries():
+            with CaptureQueriesContext(connection) as captured:
+                self.client.get('/api/accounts/')
+            return len(captured.captured_queries)
+        before=account_queries()
+        for index in range(4):
+            extra=User.objects.create_user(f'extra{index}',email=f'extra{index}@example.com',password='A-Fresh-Strong-Password!')
+            UserAccess.objects.create(organization=self.org,user=extra,role='auditor')
+        self.assertEqual(account_queries(),before)
 
     def test_disabling_user_blocks_existing_session(self):
         self.assertEqual(self.post(f'/api/accounts/{self.auditor.pk}/disable/',{}).status_code,200)

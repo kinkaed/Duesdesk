@@ -238,11 +238,14 @@ class OrganizationTests(TestCase):
 
     def test_new_write_routes_enforce_csrf_and_readonly_roles(self):
         client=Client(enforce_csrf_checks=True);client.force_login(self.ua)
-        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/']:
+        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/','/api/accounts/',f'/api/accounts/{self.ua.pk}/disable/',f'/api/accounts/{self.ua.pk}/enable/']:
             self.assertEqual(client.post(path,{}).status_code,403)
         reader=User.objects.create_user('readonly-a')
         UserAccess.objects.create(user=reader,organization=self.a,role='auditor')
         self.client.force_login(reader)
         self.assertEqual(self.client.get('/api/invites/').status_code,403)
-        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/']:
+        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/','/api/accounts/',f'/api/accounts/{self.ua.pk}/disable/',f'/api/accounts/{self.ua.pk}/enable/']:
             self.assertEqual(self.post(path).status_code,403)
+        # A read-only role must not be able to mint an account either.
+        self.assertEqual(self.post('/api/accounts/',{'username':'sneaky','email':'sneaky@example.com','password':'An-Excellent-Private-Phrase!','role':'auditor'}).status_code,403)
+        self.assertFalse(User.objects.filter(username='sneaky').exists())

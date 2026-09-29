@@ -308,7 +308,11 @@ def audit_log(request):
 def accounts(request):
     if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
     if request.method=='GET':
-        return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':role_for(u) or 'None','active':u.is_active and u.access.active} for u in User.objects.filter(access__organization=organization_for(request.user)).select_related('access').order_by('username')]})
+        # Role comes from the joined UserAccess row, not role_for(): that helper
+        # resolves active membership only, so a disabled account reported no role
+        # at all. Reading the row keeps the real role visible while active is False,
+        # and avoids one membership() query per account.
+        return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':u.access.role,'active':u.is_active and u.access.active} for u in User.objects.filter(access__organization=organization_for(request.user)).select_related('access').order_by('username')]})
     data=body(request)
     with transaction.atomic():
         user=User(username=str(data.get('username','')).strip(),email=str(data.get('email','')).strip())
@@ -350,6 +354,26 @@ def disable_account(request,pk):
         SecretaryInvite.objects.filter(organization=access.organization,created_by=user,used_at__isnull=True,revoked_at__isnull=True).update(revoked_at=timezone.now())
         audit(request.user,'account.disabled',user)
     return JsonResponse({'ok':True,'already_disabled':False})
+
+@api
+@require_http_methods(['POST'])
+def enable_account(request,pk):
+    if not secretary_only(request):return JsonResponse({'error': READ_ONLY},status=403)
+    # Restores exactly what disable_account took away: the UserAccess row and the
+    # auth flag. The role is never changed here, so a secretary cannot use this to
+    # grant access the account did not already hold.
+    with transaction.atomic():
+        user=get_object_or_404(User.objects.filter(access__organization=organization_for(request.user)).select_for_update(),pk=pk)
+        if user.is_superuser and not request.user.is_superuser:raise ValueError('Only a superuser can enable a superuser.')
+        access=user.access
+        if access.active and user.is_active:
+            # A double click must not spam the audit history with duplicate events.
+            return JsonResponse({'ok':True,'already_enabled':True})
+        access.active=True;access.save(update_fields=['active'])
+        if not user.is_active:
+            user.is_active=True;user.save(update_fields=['is_active'])
+        audit(request.user,'account.enabled',user,{'role':access.role})
+    return JsonResponse({'ok':True,'already_enabled':False})
 
 @api
 @require_GET

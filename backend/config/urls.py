@@ -28,6 +28,7 @@ urlpatterns = [
     path('api/audit/', views.audit_log),
     path('api/accounts/', views.accounts),
     path('api/accounts/<int:pk>/disable/', views.disable_account),
+    path('api/accounts/<int:pk>/enable/', views.enable_account),
     path('api/import/template/', views.import_template),
     path('api/import/preview/', views.import_preview),
     path('api/import/commit/', views.import_commit),

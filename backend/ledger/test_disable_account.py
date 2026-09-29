@@ -1,4 +1,5 @@
 from io import StringIO
+import json
 import uuid
 
 from django.contrib.auth.models import User
@@ -126,6 +127,82 @@ class DisableAccountTests(TestCase):
         self.assertTrue(self.target.is_active)
         self.assertTrue(UserAccess.objects.get(user=self.target).active)
         self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)
+
+    # Enabling is the counterpart to disabling above. It exists so a secretary can
+    # undo a mistake from the product instead of needing a server shell.
+
+    def enable(self,user):
+        return self.post(f'/api/accounts/{user.pk}/enable/')
+
+    def test_enable_restores_a_disabled_account(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        restored=self.enable(self.target)
+        self.assertEqual(restored.status_code,200)
+        self.assertEqual(restored.json()['already_enabled'],False)
+        self.target.refresh_from_db()
+        self.access.refresh_from_db()
+        self.assertTrue(self.access.active)
+        self.assertTrue(self.target.is_active)
+        # The account is genuinely usable again, not just flagged in the database.
+        self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)
+        self.assertTrue(AuditEvent.objects.filter(action='account.enabled',entity_id=str(self.target.pk)).exists())
+
+    def test_enable_is_idempotent_on_repeat(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        first=self.enable(self.target)
+        self.assertEqual(first.status_code,200)
+        self.assertEqual(first.json()['already_enabled'],False)
+        second=self.enable(self.target)
+        self.assertEqual(second.status_code,200)
+        self.assertEqual(second.json()['already_enabled'],True)
+        self.assertEqual(AuditEvent.objects.filter(action='account.enabled',entity_id=str(self.target.pk)).count(),1)
+
+    def test_enable_never_changes_the_role(self):
+        # Enabling restores access only. It must not be a way to promote an
+        # account, so an auditor comes back as an auditor.
+        auditor=User.objects.create_user('restored',email='restored@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=self.org,user=auditor,role='auditor')
+        self.assertEqual(self.disable(auditor).status_code,200)
+        self.assertEqual(self.enable(auditor).status_code,200)
+        access.refresh_from_db()
+        self.assertTrue(access.active)
+        self.assertEqual(access.role,'auditor')
+        self.assertFalse(auditor.__class__.objects.get(pk=auditor.pk).is_superuser)
+        self.assertEqual(json.loads(AuditEvent.objects.filter(action='account.enabled',entity_id=str(auditor.pk)).first().details)['role'],'auditor')
+
+    def test_cannot_enable_across_organizations(self):
+        other=Organisation.objects.create(name='Other Co')
+        stranger=User.objects.create_user('stranger',email='stranger@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=other,user=stranger,role='secretary')
+        access.active=False;access.save(update_fields=['active'])
+        self.assertEqual(self.enable(stranger).status_code,404)
+        self.assertFalse(UserAccess.objects.get(user=stranger).active)
+
+    def test_auditor_cannot_enable(self):
+        auditor=User.objects.create_user('auditor',email='auditor@example.com',password=self.password)
+        UserAccess.objects.create(organization=self.org,user=auditor,role='auditor')
+        target=User.objects.create_user('target',email='target@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=self.org,user=target,role='auditor')
+        access.active=False;access.save(update_fields=['active'])
+        target.is_active=False;target.save(update_fields=['is_active'])
+        self.client.force_login(auditor)
+        response=self.enable(target)
+        self.assertEqual(response.status_code,403)
+        self.assertFalse(UserAccess.objects.get(user=target).active)
+        self.assertFalse(User.objects.get(pk=target.pk).is_active)
+
+    def test_non_superuser_cannot_enable_a_superuser(self):
+        root=User.objects.create_user('root',email='root@example.com',password=self.password,is_superuser=True)
+        access=UserAccess.objects.create(organization=self.org,user=root,role='secretary')
+        # Reached without going through disable, which refuses a superuser target
+        # outright, so the stored state is set directly to model the legacy case.
+        access.active=False;access.save(update_fields=['active'])
+        root.is_active=False;root.save(update_fields=['is_active'])
+        response=self.enable(root)
+        self.assertEqual(response.status_code,400)
+        self.assertIn('superuser',response.json()['error'])
+        self.assertFalse(UserAccess.objects.get(user=root).active)
+        self.assertFalse(User.objects.get(pk=root.pk).is_active)
 
 
 class DisableUnderUserMemberConstraintTests(TransactionTestCase):
