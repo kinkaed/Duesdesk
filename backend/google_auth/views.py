@@ -68,7 +68,7 @@ def google_login_callback(request):
     """
     if flows.flow_of(request) not in (flows.LOGIN, flows.SIGNUP):
         # Without an entry point, nothing about this response may be trusted.
-        record(request, 'callback_without_flow', reason='no flow in session')
+        record(request, 'google.callback_without_flow', reason='no flow in session')
         return redirect(LOGIN_URL)
     from allauth.socialaccount.providers.oauth2.views import OAuth2CallbackView
 
@@ -228,7 +228,7 @@ def login_error(request, reason, user=None, email=''):
     An address with no account behind it gets a plain invitation to sign up.
     Nothing is created and no pending signup is started.
     """
-    record(request, 'google_login_rejected', user, reason=reason, email=email,
+    record(request, 'google.login_rejected', user, reason=reason, email=email,
            flow=flows.LOGIN, method='google')
     flows.finish(request, flows.LOGIN)
     if reason in ('no matching account', 'no email claim', 'unverified email'):

@@ -14,6 +14,7 @@ from django.contrib.auth.models import User
 from django.core import mail
 from django.test import Client, TestCase, override_settings
 
+from ledger.audit_taxonomy import describe, reason_label
 from ledger.models import AuditEvent, Organisation, UserAccess
 from ledger.test_signup import signup_data
 
@@ -71,12 +72,30 @@ class GoogleSignupVerificationTests(GoogleTestMixin, TestCase):
 
         user = User.objects.get(username='new-signup')
         events = [e for e in AuditEvent.objects.filter(actor=user)
-                  if e.action == 'signup_email_verified']
+                  if e.action == 'signup.email_verified']
         self.assertEqual(len(events), 1)
         details = json.loads(events[0].details)
         self.assertEqual(details['method'], 'google')
-        self.assertEqual(details['ip'], '192.0.2.12')
+        # The address is a real column rather than a field in the details JSON, so
+        # it can be correlated in a query instead of by parsing every row.
+        self.assertEqual(events[0].ip_address, '192.0.2.12')
         self.assertEqual(events[0].organization_id, user.access.organization_id)
+        self.assertTrue(events[0].request_id, 'the event must be correlatable with the log')
+        # The verification completes inside the provider callback, so the path is
+        # the callback the browser actually hit, not the page the user started on.
+        self.assertEqual(events[0].path, CALLBACK)
+
+    def test_the_verification_audit_event_reads_as_a_sentence(self):
+        # The history is read by people, so the identifier written at signup time
+        # has to resolve to a label, a category and a severity without the React
+        # side knowing the string exists.
+        self.signup_with_google(self.data())
+
+        event = AuditEvent.objects.get(action='signup.email_verified')
+        described = describe(event.action, event.outcome, 'new-signup')
+        self.assertEqual(described['label'], 'Signed up after verifying their email address')
+        self.assertEqual(described['category'], 'accounts')
+        self.assertEqual(described['severity'], 'notice')
 
     def test_a_mismatched_address_creates_nothing_and_offers_the_code(self):
         self.start_signup(self.data())
@@ -150,7 +169,7 @@ class GoogleSignupVerificationTests(GoogleTestMixin, TestCase):
 
         self.assertEqual(response.url, '/login/')
         self.assertFalse(User.objects.filter(username='new-signup').exists())
-        self.assertEqual(GoogleAuthRejection.objects.get().action, 'callback_without_flow')
+        self.assertEqual(GoogleAuthRejection.objects.get().action, 'google.callback_without_flow')
 
     def test_the_login_entry_point_cannot_complete_a_pending_signup(self):
         self.start_signup(self.data())
@@ -230,12 +249,18 @@ class GoogleLoginTests(GoogleTestMixin, TestCase):
         self.sign_in_with_google('founder@example.com')
 
         events = [e for e in AuditEvent.objects.filter(actor=self.user)
-                  if e.action in ('google_login_success', 'google_account_linked')]
+                  if e.action in ('google.login_success', 'google.account_linked')]
         self.assertEqual(sorted(e.action for e in events),
-                         ['google_account_linked', 'google_login_success'])
+                         ['google.account_linked', 'google.login_success'])
         self.assertTrue(all(e.organization_id == self.user.access.organization_id
                             for e in events))
         self.assertEqual([json.loads(e.details)['method'] for e in events], ['google', 'google'])
+        # Both are now ordinary tenant events: correlated, addressed, and
+        # described in words by the shared taxonomy rather than by a screen
+        # special-casing these two strings.
+        self.assertTrue(all(e.request_id and e.path and e.ip_address for e in events))
+        self.assertEqual(describe('google.login_success')['label'], 'Signed in with Google')
+        self.assertEqual(describe('google.account_linked')['category'], 'security')
         self.assertFalse(GoogleAuthRejection.objects.exists())
 
     def test_an_unknown_address_is_refused_with_an_invitation_to_sign_up(self):
@@ -280,6 +305,47 @@ class GoogleLoginTests(GoogleTestMixin, TestCase):
         self.assertEqual(response.url, '/login/')
         self.assertNotIn('_auth_user_id', self.client.session)
         self.assertEqual(GoogleAuthRejection.objects.get().reason, 'inactive account')
+
+    def test_a_refusal_against_a_known_account_reaches_the_tenant_audit(self):
+        # The rejection table alone is not enough: nothing in the application
+        # reads it, so a member being refused a sign-in would leave no trace in
+        # the history their own secretary reviews. The account is known here, so
+        # the refusal is filed under its organization as well.
+        self.user.is_active = False
+        self.user.save()
+
+        self.sign_in_with_google('founder@example.com')
+
+        event = AuditEvent.objects.get(action='google.login_rejected')
+        self.assertEqual(event.organization_id, self.user.access.organization_id)
+        self.assertEqual(event.actor_id, self.user.pk)
+        self.assertEqual(event.outcome, 'rejected')
+        self.assertEqual(event.reason, 'inactive account')
+        self.assertTrue(event.request_id and event.path)
+        # Both records exist: the tenantless row keeps the address and the flow
+        # for correlating repeats, the tenant row is the one a reader can see.
+        self.assertEqual(GoogleAuthRejection.objects.count(), 1)
+        described = describe(event.action, event.outcome, 'founder')
+        self.assertEqual(described['label'], 'A Google sign-in was refused')
+        # A refusal is promoted above its base severity, the same as every other
+        # non-success outcome, so it cannot be filed alongside routine successes.
+        self.assertEqual(described['severity'], 'critical')
+        self.assertEqual(reason_label(event.reason, event.outcome),
+                         'The account has been disabled.')
+
+    def test_a_refusal_against_an_unknown_address_stays_tenantless(self):
+        # There is no account and so no organization. Inventing one would put a
+        # stranger's failed sign-in in somebody else's history, so the row stays
+        # in the rejection table, where no tenant can read it.
+        self.sign_in_with_google('stranger@example.com')
+
+        self.assertEqual(GoogleAuthRejection.objects.get().action, 'google.login_rejected')
+        self.assertFalse(AuditEvent.objects.filter(action='google.login_rejected').exists())
+        # The attempt is still fully recorded, just not as a tenant event.
+        rejection = GoogleAuthRejection.objects.get()
+        self.assertEqual(rejection.email, 'stranger@example.com')
+        self.assertIsNone(rejection.user_id)
+        self.assertTrue(rejection.ip)
 
     def test_a_linked_identity_claiming_another_address_is_refused(self):
         self.sign_in_with_google('founder@example.com')

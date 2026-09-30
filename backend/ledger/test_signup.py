@@ -1,3 +1,4 @@
+import json
 from io import BytesIO, StringIO
 from datetime import timedelta
 
@@ -388,12 +389,13 @@ class SignupTests(GoogleTestMixin, TestCase):
         user = User.objects.get(username='new-signup')
         self.assertTrue(EmailAddress.objects.get(
             user=user, email='new-signup@example.com').verified)
-        self.assertIn('signup_email_verified',
-                      [e.action for e in AuditEvent.objects.filter(actor=user)])
-        details = next(e.details for e in AuditEvent.objects.filter(
-            actor=user, action='signup_email_verified'))
-        self.assertIn('"method": "code"', details)
-        self.assertIn('192.0.2.12', details)
+        event = AuditEvent.objects.get(actor=user, action='signup.email_verified')
+        # The address is a column on the row, not a field in the details JSON, so
+        # it can be filtered in a query rather than found by parsing every row.
+        self.assertEqual(event.ip_address, '192.0.2.12')
+        self.assertEqual(json.loads(event.details)['method'], 'code')
+        self.assertEqual(event.organization_id, user.access.organization_id)
+        self.assertTrue(event.request_id)
 
     # ------------------------------------------------------- unrelated, kept
 

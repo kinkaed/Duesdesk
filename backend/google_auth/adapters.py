@@ -202,8 +202,8 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
         # Retain passwords, rotate the session/CSRF normally, and avoid all
         # allauth signup, confirmation, connection and notification views.
         if newly_linked:
-            record_user(request, 'google_account_linked', user, method=GOOGLE, email=email)
-        record_user(request, 'google_login_success', user, method=GOOGLE, email=email)
+            record_user(request, 'google.account_linked', user, method=GOOGLE, email=email)
+        record_user(request, 'google.login_success', user, method=GOOGLE, email=email)
         login(request, user, backend=BACKEND)
         request.session[flows.LOGGED_IN_EMAIL] = email.lower()
         flows.finish(request, flows.LOGIN)

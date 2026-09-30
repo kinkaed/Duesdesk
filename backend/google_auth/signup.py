@@ -293,7 +293,7 @@ def complete(request, pending, method):
         PendingSignup.objects.filter(pk=locked.pk).delete()
 
         ledger_audit(user, 'organization.joined' if invite else 'organization.created', org)
-        record_user(request, 'signup_email_verified', user, method=method, email=locked.email)
+        record_user(request, 'signup.email_verified', user, method=method, email=locked.email)
 
     # Only once the transaction has committed. Signing in before the commit
     # would leave a live session for an account that does not exist.
@@ -318,7 +318,7 @@ def _link_google(request, user, email):
         defaults={'extra_data': {'email': email, 'email_verified': True}})
 
 
-def refuse(request, key, pending=None, action='verify_rejected', reason=None, email='',
+def refuse(request, key, pending=None, action='signup.verification_rejected', reason=None, email='',
            method=''):
     """Record a refusal and hand the reason to the verification page."""
     record(request, action, reason=reason or key,

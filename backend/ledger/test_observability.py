@@ -38,6 +38,8 @@ from .audit_taxonomy import (
 )
 from .auth_views import username_fingerprint
 from .models import AuditEvent, Member, Organisation, UserAccess
+from google_auth.audit import record as google_record
+from google_auth.models import GoogleAuthRejection
 from .observability import (
     ANONYMOUS_ACTIONS,
     RequestContext,
@@ -61,6 +63,11 @@ class _FakeRequest:
 
     def __init__(self, **meta):
         self.META = meta
+
+
+def request_with_remote_addr(address):
+    """A request carrying only the peer address, for the audit helpers to read."""
+    return _FakeRequest(REMOTE_ADDR=address)
 
 
 class _RecordCollector(logging.Handler):
@@ -597,6 +604,69 @@ class AuthAuditTests(TestCase):
         logged = ' '.join(str(call) for call in logger.log.call_args_list)
         self.assertNotIn('My-Secret-Attempt-99', logged)
 
+    def test_the_google_refusal_of_a_known_account_is_recorded_for_the_tenant(self):
+        # The google_auth app records through this helper, so its refusals are
+        # held to the same standard: correlated, addressed, and explained in
+        # words. A member whose Google sign-in is refused is a security event the
+        # organization's own secretary should be able to read.
+        with patch('ledger.services.current_context',
+                   return_value=RequestContext('req-google', 'GET', '/accounts/google/login/callback/',
+                                               ip_address='192.0.2.9', user_agent='Mozilla/5.0')):
+            google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
+                          user=self.secretary, reason='inactive account', email='s@example.com',
+                          flow='login', method='google')
+        event = AuditEvent.objects.get(action='google.login_rejected')
+        self.assertEqual(event.organization, self.org)
+        self.assertEqual(event.actor, self.secretary)
+        self.assertEqual(event.outcome, 'rejected')
+        self.assertEqual(event.reason, 'inactive account')
+        self.assertEqual(event.entity, 'User')
+        self.assertEqual(event.entity_id, str(self.secretary.pk))
+        self.assertEqual(event.request_id, 'req-google')
+        self.assertEqual(event.ip_address, '192.0.2.9')
+        self.assertEqual(event.path, '/accounts/google/login/callback/')
+        self.assertEqual(event.user_agent, 'Mozilla/5.0')
+        # The provider and the flow are the only extras; the address lives in a
+        # column and the time in created_at, so neither is repeated here.
+        details = json.loads(event.details)
+        self.assertEqual(details, {'provider': 'google', 'method': 'google',
+                                   'flow': 'login', 'email': 's@example.com'})
+        # And it reads as a sentence, without a screen knowing the identifier.
+        described = describe(event.action, event.outcome, 'secretary')
+        self.assertEqual(described['label'], 'A Google sign-in was refused')
+        self.assertEqual(described['category'], 'security')
+        self.assertEqual(reason_label(event.reason, event.outcome),
+                         'The account has been disabled.')
+
+    def test_a_google_refusal_with_no_account_is_never_filed_under_a_tenant(self):
+        # An address that matches nothing has no organization, and inventing one
+        # would drop a stranger's failed sign-in into somebody else's history. It
+        # is recorded in the tenantless rejection table instead, and the audit
+        # helper is never called with a row nobody could read.
+        google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
+                      reason='no matching account', email='stranger@example.com',
+                      flow='login', method='google')
+
+        rejection = GoogleAuthRejection.objects.get()
+        self.assertEqual(rejection.action, 'google.login_rejected')
+        self.assertEqual(rejection.reason, 'no matching account')
+        self.assertEqual(rejection.email, 'stranger@example.com')
+        self.assertIsNone(rejection.user_id)
+        self.assertFalse(AuditEvent.objects.filter(action='google.login_rejected').exists())
+
+    def test_a_google_refusal_survives_a_failing_database(self):
+        # Same contract as every other audit call site: a sign-in refusal must
+        # still be a sign-in refusal if the audit write fails.
+        with patch('google_auth.audit.GoogleAuthRejection.objects.create',
+                   side_effect=OperationalError('audit unavailable')):
+            google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
+                          user=self.secretary, reason='inactive account',
+                          email='s@example.com', flow='login', method='google')
+        # The refusal is not recorded anywhere, but the request is not turned
+        # into a 500 either, and the second write still happens.
+        self.assertFalse(GoogleAuthRejection.objects.exists())
+        self.assertTrue(AuditEvent.objects.filter(action='google.login_rejected').exists())
+
     def test_an_unknown_username_and_a_wrong_password_are_recorded_identically(self):
         # Any difference here would tell an attacker which accounts are real.
         self.client.post('/login/', {'username': 'secretary', 'password': 'wrong-password'})
@@ -1065,17 +1135,28 @@ class TaxonomyTests(TestCase):
         # corresponding entry. Scanning the source is the same technique the
         # legacy-rename test already uses.
         import pathlib
-        source = pathlib.Path(__file__).parent
+        # Every app that writes audit events, not just this one. The google_auth
+        # app records through ledger.services.audit too, and an action it writes
+        # without a label here would be just as invisible to a reader.
+        source = pathlib.Path(__file__).parent.parent
         written = set()
         for path in source.rglob('*.py'):
             if 'migrations' in str(path) or path.name.startswith('test'):
                 continue
             for line in path.read_text(encoding='utf-8').splitlines():
-                for match in re.finditer(r"""audit\([^,]+,\s*'([a-z][a-z0-9_.]*)'""", line):
-                    written.add(match.group(1))
-                # The replayed outcome is raised as a keyword argument rather than
-                # a literal, so it is matched separately. A dot is required in the
-                # pattern, which is what keeps an argparse action='store_true' in
+                # The action is the second positional argument of the ledger
+                # helper, of the google_auth member helper, or of the google_auth
+                # refusal helper. All three are named so the scan cannot miss a
+                # fourth call site written later.
+                for pattern in (r"""audit\([^,]+,\s*'([a-z][a-z0-9_.]*)'""",
+                                r"""record_user\([^,]+,\s*'([a-z][a-z0-9_.]*)'""",
+                                r"""record\(\s*request,\s*'([a-z][a-z0-9_.]*)'"""):
+                    for match in re.finditer(pattern, line):
+                        written.add(match.group(1))
+                # An action passed as a keyword, which is how the verification
+                # refusal takes its default. The replayed outcome is raised this
+                # way too, so it is matched by the same pattern. A dot is
+                # required, which is what keeps an argparse action='store_true' in
                 # a management command out of the results.
                 for match in re.finditer(r"""action\s*=\s*'([a-z][a-z0-9_]*\.[a-z0-9_.]+)'""", line):
                     written.add(match.group(1))
