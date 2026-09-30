@@ -6,6 +6,7 @@ from django.db import close_old_connections
 from django.test import TransactionTestCase, Client, override_settings, skipUnlessDBFeature
 from django.utils import timezone
 from .models import Organisation,UserAccess,SecretaryInvite
+from google_auth.models import PendingSignup
 from .organization_views import token_hash
 from .test_organizations import STORAGES
 
@@ -41,6 +42,16 @@ class OrganizationConcurrencyTests(TransactionTestCase):
                 return Client().post('/signup/?invite='+token,{'username':'joined-'+str(index),'email':'invite@example.com','password1':'Long-Secret-Password-928!','password2':'Long-Secret-Password-928!'}).status_code
             finally:close_old_connections()
         with ThreadPoolExecutor(max_workers=2) as executor:results=list(executor.map(join,[1,2]))
-        self.assertEqual(results.count(302),1)
-        self.assertEqual(User.objects.filter(username__startswith='joined-').count(),1)
-        self.assertIsNotNone(SecretaryInvite.objects.get(token_hash=token_hash(token)).used_at)
+        # Posting a signup no longer creates an account: every signup (invite or
+        # not) first proves the address, so the race is about the *pending*
+        # signup for one invited email, not about a User. The invariant the
+        # delete-then-insert in google_auth.signup.create must hold under
+        # concurrency is "exactly one pending row per email" -- whichever
+        # thread wins, the other must answer ordinarily, never with a 500.
+        self.assertLess(max(results), 500)
+        self.assertIn(302, results)
+        self.assertEqual(PendingSignup.objects.filter(email='invite@example.com').count(),1)
+        # Nothing has been proven yet, so no account exists and the invitation
+        # is still unredeemed. Only the verification step consumes either.
+        self.assertEqual(User.objects.filter(username__startswith='joined-').count(),0)
+        self.assertIsNone(SecretaryInvite.objects.get(token_hash=token_hash(token)).used_at)

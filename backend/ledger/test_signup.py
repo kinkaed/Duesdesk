@@ -432,6 +432,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.assertFalse(PendingSignup.objects.filter(pk=expired.pk).exists())
 
 
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
 class ExistingEmailTests(TestCase):
     """The refusal when the address already belongs to an account."""
 
