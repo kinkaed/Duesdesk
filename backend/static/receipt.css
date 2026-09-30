@@ -1,0 +1,8 @@
+.receipt-header{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:24px;break-inside:avoid}
+.receipt-label{font-size:11px;font-weight:700;letter-spacing:2px;line-height:1.5;color:#526c63;flex-shrink:0}
+.receipt-identity{display:flex;align-items:center;justify-content:flex-end;gap:16px;min-width:0;max-width:65%;text-align:right}
+.receipt-logo{display:block;width:88px;height:80px;object-fit:contain;flex-shrink:0;opacity:1;filter:none}
+.receipt-logo-fallback{display:grid;place-items:center;width:80px;height:80px;flex-shrink:0;border-radius:14px;background:var(--receipt-brand,#214f43);color:var(--receipt-brand-text,#fff);font-size:26px;font-weight:750}
+.receipt-organisation-name{font-size:20px;line-height:1.3;color:#1a2e2a;font-weight:750;overflow-wrap:anywhere;white-space:normal;min-width:0}
+@media screen and (max-width:540px){.receipt-header{flex-direction:column;align-items:flex-start;gap:18px}.receipt-identity{order:-1;max-width:100%;justify-content:flex-start;text-align:left}.receipt-organisation-name{font-size:18px}}
+@media print{.receipt-header{display:flex;flex-direction:row;align-items:center;break-inside:avoid}.receipt-identity{max-width:65%;text-align:right}.receipt-logo,.receipt-logo-fallback{print-color-adjust:exact;-webkit-print-color-adjust:exact}.receipt-organisation-name{color:#1a2e2a}}

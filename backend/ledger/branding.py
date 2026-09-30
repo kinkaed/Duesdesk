@@ -31,7 +31,7 @@ def branding_json(org):
     for key,default in DEFAULTS.items():
         try:palette[key]=color(getattr(org,key))
         except (ValueError,AttributeError):palette[key]=default
-    return {'id':org.pk,'public_id':str(org.public_id),'name':org.name,
+    return {'id':org.pk,'public_id':str(org.public_id),'name':org.name, 'initials':''.join(word[0] for word in org.name.split()[:4]).upper() or 'ORG',
             'logo_url':f'/organizations/{org.public_id}/logo/' if org.logo else '',
             **palette, **{f'{k}_text':text_color(v) for k,v in palette.items()}}
 
@@ -46,10 +46,10 @@ def decode_logo(upload):
             if image.format not in ('PNG','JPEG','WEBP') or image.width*image.height > 4000000:
                 raise ValueError('Use a PNG, JPEG or WebP with at most 4 million pixels.')
             image = ImageOps.exif_transpose(image)
-            image.thumbnail((256,256))
             rgba = image.convert('RGBA')
             rgb = Image.new('RGB',rgba.size,'white')
             rgb.paste(rgba,mask=rgba.getchannel('A'))
+            rgb.thumbnail((256,256))
             quantized = rgb.quantize(colors=8, method=Image.Quantize.MEDIANCUT)
             raw = quantized.getpalette()
             ranked = sorted(quantized.getcolors(),reverse=True)
