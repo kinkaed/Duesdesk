@@ -55,6 +55,12 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'axes',
     'ledger',
+    'django.contrib.sites',
+    'allauth',
+    'allauth.account',
+    'allauth.socialaccount',
+    'allauth.socialaccount.providers.google',
+    'google_auth',
 ]
 MIDDLEWARE = [
     # Outermost, so every request gets a correlation id: the redirect from
@@ -66,6 +72,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'ledger.middleware.SecurityHeadersMiddleware',
@@ -81,7 +88,10 @@ if os.environ.get('TEST_SQLITE') == '1':
 else:
     default_url = required('DATABASE_URL') if PRODUCTION else os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/duesdesk')
     DATABASES = {'default': dj_database_url.config(default=default_url, conn_max_age=600, conn_health_checks=True)}
-AUTHENTICATION_BACKENDS = ['axes.backends.AxesStandaloneBackend', 'django.contrib.auth.backends.ModelBackend']
+# ModelBackend first so password login keeps its existing behaviour; the Axes
+# backend stays for lockout. allauth's own backend is deliberately not listed:
+# no allauth route is mounted and Google signs in explicitly via ModelBackend.
+AUTHENTICATION_BACKENDS = ['django.contrib.auth.backends.ModelBackend', 'axes.backends.AxesStandaloneBackend']
 AXES_FAILURE_LIMIT = 5
 AXES_COOLOFF_TIME = timedelta(minutes=15)
 AXES_LOCKOUT_PARAMETERS = ['username', ['username', 'ip_address']]
@@ -195,5 +205,30 @@ LOGGING = {
         'django.security': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
         'axes': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
         'ledger': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
+    },
+}
+
+# Google OAuth is backend-only. Only the two explicit Google URLs are mounted.
+SITE_ID = 1
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
+ACCOUNT_ADAPTER = 'google_auth.adapters.AccountAdapter'
+SOCIALACCOUNT_ADAPTER = 'google_auth.adapters.GoogleAdapter'
+ACCOUNT_LOGIN_METHODS = {'username'}
+ACCOUNT_SIGNUP_FIELDS = ['username*', 'email*', 'password1*', 'password2*']
+ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
+ACCOUNT_UNIQUE_EMAIL = True
+ACCOUNT_LOGIN_ON_EMAIL_CONFIRMATION = False
+SOCIALACCOUNT_LOGIN_ON_GET = True
+SOCIALACCOUNT_AUTO_SIGNUP = False
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = False  # Explicit strict matching in our adapter.
+SOCIALACCOUNT_STORE_TOKENS = False
+SOCIALACCOUNT_EMAIL_VERIFICATION = 'mandatory'
+SOCIALACCOUNT_PROVIDERS = {
+    'google': {
+        'APP': {'client_id': GOOGLE_CLIENT_ID, 'secret': GOOGLE_CLIENT_SECRET, 'key': ''},
+        'SCOPE': ['openid', 'email', 'profile'],
+        'AUTH_PARAMS': {'access_type': 'online'},
+        'OAUTH_PKCE_ENABLED': True,
     },
 }

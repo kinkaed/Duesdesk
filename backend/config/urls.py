@@ -1,5 +1,7 @@
 from django.contrib.auth import views as auth
 from django.urls import path
+from google_auth import views as google_views
+from google_auth.forms import GuardedAuthenticationForm, GooglePasswordResetForm
 from ledger import views, organization_views as org_views
 from ledger.auth_views import (
     AuditableLoginView,
@@ -10,6 +12,12 @@ from ledger.auth_views import (
 )
 
 urlpatterns = [
+    path('accounts/google/login/', google_views.google_login, name='google_login'),
+    # The one callback for both Google flows. The session, set by the entry
+    # point above, decides whether this verifies a signup or opens an account.
+    path('accounts/google/login/callback/', google_views.google_login_callback, name='google_callback'),
+    path('accounts/google/verify/', google_views.google_verify, name='google_verify'),
+    path('signup/verify/', google_views.verify, name='verify_email'),
     path('', views.home),
     # Every page of the application is the same shell, reached by its own path so
     # the address bar identifies the page and the back button steps between pages.
@@ -21,15 +29,16 @@ urlpatterns = [
         for page in ('overview', 'members', 'payments', 'reports', 'manage', 'audit', 'profile')
     ],
     path('api/session/', views.session_info),
-    # Subclasses of the stock auth views, not the stock views: these are the
-    # events that happen before any ordinary view runs, so they are recorded
-    # where the success or failure is actually known.
-    path('login/', AuditableLoginView.as_view(), name='login'),
+    # The auditable subclasses stay in charge (they are the events that happen
+    # before any ordinary view runs), and take the Google-aware forms so a
+    # locked account is refused without a database lookup and a Google-only
+    # account can reset its password.
+    path('login/', AuditableLoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
     path('logout/', AuditableLogoutView.as_view()),
     path('signup/', org_views.signup, name='signup'),
     path('account/password/', AuditablePasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),
     path('account/password/done/', auth.PasswordChangeDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password changed','description':'Your new password is ready to use.'}), name='password_change_done'),
-    path('account/reset/', AuditableRecoveryView.as_view(), name='password_reset'),
+    path('account/reset/', AuditableRecoveryView.as_view(form_class=GooglePasswordResetForm), name='password_reset'),
     path('account/reset/sent/', auth.PasswordResetDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Check your email','description':'If this email belongs to an active account, a reset link will be sent. Check spam too. Contact your secretary if it does not arrive.'}), name='password_reset_done'),
     path('account/reset/<uidb64>/<token>/', AuditablePasswordResetConfirmView.as_view(template_name='registration/account_form.html', extra_context={'heading':'Choose a new password','button':'Save password'}), name='password_reset_confirm'),
     path('account/reset/complete/', auth.PasswordResetCompleteView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password reset','description':'You can now sign in with your new password.'}), name='password_reset_complete'),

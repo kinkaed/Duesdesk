@@ -55,6 +55,13 @@ def _locked_out(username, ip_address):
 
 
 class AuditableLoginView(auth.LoginView):
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        # Surfaces a Google round-trip refusal stored in the session by
+        # google_auth.login_error; the form, fields and layout are untouched.
+        context['google_login_error'] = self.request.session.pop('google_login_error', None)
+        return context
+
     def form_valid(self, form):
         response = super().form_valid(form)
         user = form.get_user()
