@@ -1,13 +1,14 @@
 # Hosting and go-live
 
-This source is prepared for online deployment on **Render** (Docker web service) with **Neon PostgreSQL**. The connection string is a secret (`DATABASE_URL`). No cloud resources are purchased or deployed from this local build.
+This source is prepared for online deployment on **Render** with **Neon PostgreSQL**. The connection string is a secret (`DATABASE_URL`). No cloud resources are purchased or deployed from this local build.
 
 ## Recommended setup: Render web service + Neon PostgreSQL
 
 The two services are separate accounts. Keep both in the **Frankfurt** region. The Dockerfile builds the React frontend and the Django/Waitress backend with no Microsoft ODBC components; the app connects only to PostgreSQL.
 
 1. **Create the Neon project** named `Duesdesk` in the Frankfurt (eu-central-1) region. Of the connection strings offered, use the **pooled** connection string (`-pooler.neon.tech` host) for the running app. A staff member with a regular (non-pooled) connection string can run migrations and checks.
-2. **Create a Render web service** `duesdesk` from the `kinkaed/Duesdesk` repository, `runtime: docker` (the supplied `render.yaml` does this), using the updated Dockerfile. Set the health-check route `/health/` and HTTPS Only.
+2. **Create the Render web service** `duesdesk` from the `kinkaed/Duesdesk` repository. Applying the supplied `render.yaml` is the supported path: it declares `runtime: python` and supplies the build, start, and pre-deploy commands, including the migration step. Set the health-check route `/health/` and HTTPS Only.
+   If you instead choose `runtime: docker` by hand, the blueprint is ignored, so you own every step it would have run. In particular the image's `CMD` is `python serve.py` and does **not** migrate, so add an explicit release command (`python manage.py migrate --noinput && python manage.py deployment_check`) before each deploy; the app will otherwise start against a stale schema.
 3. **Configure secrets.** Put `DATABASE_URL` and every value in the environment list below into Render secret settings. Never commit real values. Use a new random `DJANGO_SECRET_KEY`, your live hostname, trusted origins and SMTP credentials.
 4. **Bootstrap the database** once per release with a migration step, then start the app (see "Build and first deployment").
 5. **Credentials in the browser** are never used; the database is reached only from the Django service using `DATABASE_URL`.

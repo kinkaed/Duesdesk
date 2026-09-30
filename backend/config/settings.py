@@ -9,7 +9,31 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env', override=False)
-PRODUCTION = os.environ.get('APP_ENV', 'local') == 'production'
+
+# APP_ENV is the single switch that decides whether this process runs with
+# production security, and it is compared against 'production' exactly. That
+# exactness is deliberate: it is what makes an unrecognised value fall through
+# to the local posture rather than the production one, so anything that can start
+# the app must guarantee the value first.
+#
+# serve.py does that, before Django is imported, so a live service never gets
+# this far with a misspelled APP_ENV. This check covers every other entry point
+# that imports settings without going through serve.py — manage.py, the WSGI
+# application object, a one-off shell. A value this module cannot categorise
+# would otherwise pick a security posture by accident rather than by decision,
+# so it stops here instead.
+#
+# Normalization stays in serve.py, where it can exit with an actionable message.
+# Stripping and lowercasing here would let a typo through unnoticed, which is the
+# outcome this whole check exists to prevent.
+APP_ENV = os.environ.get('APP_ENV', 'local')
+KNOWN_ENVIRONMENTS = ('local', 'test', 'production')
+if APP_ENV not in KNOWN_ENVIRONMENTS:
+    raise ImproperlyConfigured(
+        f'APP_ENV must be exactly one of {", ".join(KNOWN_ENVIRONMENTS)}; got {APP_ENV!r}. '
+        'Start through serve.py, which reports this before Django loads.'
+    )
+PRODUCTION = APP_ENV == 'production'
 DEMO_MODE = not PRODUCTION
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes', 'on')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
@@ -30,10 +54,10 @@ if PRODUCTION:
     SECRET_KEY = required('DJANGO_SECRET_KEY')
     if len(SECRET_KEY) < 50:
         raise ImproperlyConfigured('Use a random DJANGO_SECRET_KEY of at least 50 characters.')
-    explicit_hosts = csv_values(os.environ.get('ALLOWED_HOSTS', ''))
+    explicit_hosts = required('ALLOWED_HOSTS')
     if '*' in explicit_hosts:
         raise ImproperlyConfigured('Explicit ALLOWED_HOSTS are required.')
-    hosts = list(explicit_hosts)
+    hosts = csv_values(explicit_hosts)
     if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in hosts:
         hosts.append(RENDER_EXTERNAL_HOSTNAME)
     ALLOWED_HOSTS = hosts
@@ -144,6 +168,16 @@ if not PRODUCTION:
     for dev_origin in csv_values(os.environ.get('DEV_TRUSTED_ORIGINS', 'http://127.0.0.1:5173,http://localhost:5173')):
         if dev_origin not in origins:
             origins.append(dev_origin)
+# Empty here means the app accepts no cross-origin form post at all, so every
+# write — signing in included — fails with a 403. That is the safe direction,
+# but it presents as an unexplained outage rather than a configuration error, and
+# nothing in the boot sequence said so. RENDER_EXTERNAL_HOSTNAME alone is enough
+# on Render, where the platform always sets it for a web service.
+if PRODUCTION and not origins:
+    raise ImproperlyConfigured(
+        'CSRF_TRUSTED_ORIGINS is required in production (comma-separated https '
+        'origins), unless RENDER_EXTERNAL_HOSTNAME is set.'
+    )
 CSRF_TRUSTED_ORIGINS = origins
 SECURE_SSL_REDIRECT = PRODUCTION
 SECURE_HSTS_SECONDS = 31536000 if PRODUCTION else 0

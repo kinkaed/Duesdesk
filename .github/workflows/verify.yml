@@ -24,16 +24,23 @@ jobs:
       # production storage backend. TEST_SQLITE is deliberately unset because
       # settings.py refuses SQLite in production; the secret and DB URL are
       # placeholders, as neither command connects to the database.
+      # ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS are required in production and
+      # are placeholders on the reserved .invalid TLD (RFC 2606), which cannot
+      # resolve to a real host.
       - run: python backend/manage.py collectstatic --noinput
         env:
           APP_ENV: production
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-0123456789-abcdefghijklmnopqrstuvwxyz
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          ALLOWED_HOSTS: ci-only.invalid
+          CSRF_TRUSTED_ORIGINS: https://ci-only.invalid
       - run: python backend/manage.py verify_static
         env:
           APP_ENV: production
           DJANGO_SECRET_KEY: ci-only-not-a-real-secret-0123456789-abcdefghijklmnopqrstuvwxyz
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          ALLOWED_HOSTS: ci-only.invalid
+          CSRF_TRUSTED_ORIGINS: https://ci-only.invalid
       - run: python backend/manage.py test ledger google_auth
         env:
           TEST_SQLITE: '1'

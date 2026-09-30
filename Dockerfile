@@ -27,9 +27,16 @@ COPY --from=frontend /app/backend/static/app ./static/app
 # The environment is set on the command rather than with ENV, so the placeholder
 # secret is not baked into the image: the container at runtime must not start in
 # production mode holding a secret that is printed in this file.
+#
+# ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS are mandatory in production and are
+# placeholders on the reserved .invalid TLD (RFC 2606), which cannot resolve to a
+# real host. Keep this list in step with the production requirements in
+# settings.py; ledger.test_production_config asserts it stays complete.
 RUN APP_ENV=production \
     DJANGO_SECRET_KEY=ci-only-not-a-real-secret-0123456789-abcdefghijklmnopqrstuvwxyz \
     DATABASE_URL=postgresql://postgres:postgres@localhost:5432/postgres \
+    ALLOWED_HOSTS=ci-only.invalid \
+    CSRF_TRUSTED_ORIGINS=https://ci-only.invalid \
     sh -c 'python manage.py collectstatic --noinput --verbosity 2 \
            && python manage.py verify_static' \
     && rm -f .local-secret \
