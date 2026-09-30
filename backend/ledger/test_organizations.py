@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from .models import Organisation, UserAccess, Member, Payment, Allocation, DuesMonth, SecretaryInvite, ImportBatch
 from .services import record_payment
 from .branding import decode_logo, text_color, luminance, branding_json, DEFAULTS
+from google_auth.models import PendingSignup
 from google_auth.testsupport import GoogleTestMixin
 
 STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}}
@@ -89,9 +90,11 @@ class OrganizationTests(GoogleTestMixin, TestCase):
         token=parse_qs(urlparse(result['url']).query)['invite'][0]
         self.assertNotEqual(invite.token_hash,token)
         visitor=Client()
-        self.verify_signup_email('wrong@example.com',token,client=visitor)
+        # The invitation is bound to an address, so a different one is refused at
+        # submission and never reaches verification.
         wrong=visitor.post('/signup/?invite='+token,self.signup_data('wrong@example.com'))
         self.assertContains(wrong,'Use the email address')
+        self.assertFalse(PendingSignup.objects.exists())
         self.assertFalse(User.objects.filter(username='new-secretary').exists())
         self.assertEqual(self.google_signup(visitor,self.signup_data(),token).status_code,302)
         user=User.objects.get(username='new-secretary')

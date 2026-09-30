@@ -2,10 +2,9 @@ import hashlib
 import logging
 import secrets
 from datetime import timedelta
-from django.contrib.auth import login, logout
+from django.contrib.auth import logout
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
-from django.db import transaction, IntegrityError
 from django.http import JsonResponse, HttpResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.utils import timezone
@@ -16,7 +15,7 @@ from .access import organization_for, role_for
 from google_auth import flows as google_flows, signup as google_signup
 
 logger = logging.getLogger(__name__)
-from .branding import DEFAULTS, branding_json, decode_logo, logo_token, read_logo_token, color
+from .branding import DEFAULTS, branding_json, color, decode_logo, logo_token
 from .forms import SignupForm
 from .services import audit
 from .views import api, body
@@ -61,55 +60,65 @@ def logo(request, public_id):
 @require_http_methods(['GET','POST'])
 def signup(request):
     if request.user.is_authenticated:return redirect('/')
-    token=request.GET.get('invite','')
+    # "Wrong email, go back" on the verification page keeps the typed values,
+    # except the password, which is never held anywhere.
+    kept=request.session.pop(google_flows.RETURN,None)
+    # The invitation is taken from the link, and otherwise from the session,
+    # which is how it survives a trip via the verification page. It is never
+    # trusted from a posted field.
+    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(google_flows.INVITE,'') or ''
     invite=valid_invite(token) if token else None
     if token and not invite:return render(request,'registration/invite_invalid.html',status=400)
-    proved=google_signup.verified_email(request)
-    form=SignupForm(request.POST or None,initial={'email':proved} if proved and not request.POST else None)
-    org_name=request.POST.get('organization_name','').strip()
-    owner=preview_owner(request)
+    initial={}
+    if kept:
+        initial={k:v for k,v in kept.items() if k not in ('invite','logo_token','palette') and v}
+    form=SignupForm(request.POST or None,initial=initial or None)
+    org_name=request.POST.get('organization_name','').strip() or (kept or {}).get('organization_name','')
+    logo_token=(request.POST.get('logo_token')
+               or request.session.get(google_flows.LOGO,'') or (kept or {}).get('logo_token',''))
     if request.method=='POST' and form.is_valid():
-        # Google proves the address; it never creates the account. Without a
-        # current proof of this exact address, signup does not run at all.
-        problem=google_signup.block(request,form.cleaned_data['email'])
-        if problem:form.add_error(None,problem)
+        # Validate exactly as before, then create nothing. The user, the
+        # organization and the membership are created only once the address has
+        # been proven; see google_auth.signup.complete.
+        try:
+            if not token and not org_name:raise ValueError('Enter an organization name.')
+            if token:
+                # Nothing is created here, so this is only a friendly check to
+                # stop somebody typing a wrong address. The invitation is locked
+                # and rechecked for real in google_auth.signup.complete.
+                locked=valid_invite(token)
+                if locked is None:
+                    raise ValueError('This invitation is no longer valid.')
+                if form.cleaned_data['email'].casefold()!=locked.email.casefold():
+                    raise ValueError('Use the email address named in your invitation.')
+            palette=dict((kept or {}).get('palette') or {})
+            for field,default in DEFAULTS.items():
+                palette[field]=color(request.POST.get(field) or palette.get(field,default))
+        except (ValueError,ValidationError) as error:
+            form.add_error(None,str(error))
         else:
-            try:
-                with transaction.atomic():
-                    if token:
-                        # Serialize invitations and membership changes on the organization row.
-                        org=Organisation.objects.select_for_update().get(pk=invite.organization_id)
-                        locked=SecretaryInvite.objects.select_for_update().get(pk=invite.pk)
-                        if locked.used_at or locked.revoked_at or locked.expires_at<=timezone.now():
-                            raise ValueError('This invitation is no longer valid.')
-                        if form.cleaned_data['email'].casefold()!=locked.email.casefold():
-                            raise ValueError('Use the email address named in your invitation.')
-                    else:
-                        if not org_name:raise ValueError('Enter an organization name.')
-                        org=Organisation(name=org_name)
-                        for field,default in DEFAULTS.items():setattr(org,field,color(request.POST.get(field,default)))
-                        if request.POST.get('logo_token'):org.logo=read_logo_token(request.POST['logo_token'],owner)
-                        org.full_clean();org.save()
-                    user=form.save()
-                    UserAccess.objects.create(user=user,organization=org,role='secretary')
-                    if token:
-                        locked.used_at=timezone.now();locked.used_by=user;locked.save(update_fields=['used_at','used_by'])
-                    audit(user,'organization.joined' if token else 'organization.created',org)
-                    google_signup.complete(request,user)
-                login(request,user,backend='django.contrib.auth.backends.ModelBackend')
-                return redirect('/')
-            except (ValueError,ValidationError) as error:form.add_error(None, str(error))
-            except IntegrityError:
-                # This used to collapse every database conflict into one sentence with
-                # nothing in the log, which made signup failures undiagnosable.
-                logger.exception('IntegrityError during signup invite=%s', bool(token))
-                form.add_error(None,'This account or invitation has already been used. Please sign in or request a new invitation.')
-    # A refusal from the Google round trip is shown on this page, which is also
-    # reached by plain GET, so it goes in the context rather than on the form.
-    refused=request.session.pop(google_flows.SIGNUP_ERROR,None)
-    context={'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
-             'google_signup_verified':proved,'google_signup_error':refused,
-             'palette':{k:request.POST.get(k,v) for k,v in DEFAULTS.items()},'logo_token':request.POST.get('logo_token','')}
+            pending,problem=google_signup.create(request,form,org_name,invite_token=token,
+                palette=palette,logo_token=logo_token)
+            if problem:form.add_error(None,problem)
+            else:
+                # Nothing exists but a pending signup and the email we are about
+                # to send. Sign in happens here only after verification.
+                google_flows.begin_signup(request,pending.token)
+                # The pending signup keeps only the invitation's hash and the
+                # decoded logo, so both are held here to survive "wrong email,
+                # go back".
+                request.session[google_flows.INVITE]=token
+                request.session[google_flows.LOGO]=logo_token
+                problem=google_signup.send_code(request,pending)
+                if problem:request.session[google_flows.SIGNUP_ERROR]=problem
+                else:request.session['verify_code_sent']=True
+                return redirect('/signup/verify/')
+    context={
+        'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
+        'palette':{k:request.POST.get(k,(kept or {}).get('palette',{}).get(k,v)) for k,v in DEFAULTS.items()},
+        'logo_token':logo_token}
+    # An invitation brings its organization with it, so the card is shown in that
+    # organization's colors and logo.
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))
     return render(request,'registration/signup.html',context)
 

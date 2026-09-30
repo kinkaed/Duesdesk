@@ -1,6 +1,16 @@
-"""Google may prove an address or open an existing account. It creates neither."""
+"""Google proves an address, or opens an account that already exists.
+
+Both uses share one callback URL, so the only thing that decides which one is
+running is the flow recorded in the session by the entry point. Nothing in the
+request can set or change it, which is what makes it impossible for the login
+callback to complete a signup or for the verification callback to sign anybody
+in.
+
+Account creation lives in ``signup.complete``. This module never creates a
+user, an organization or a membership.
+"""
 from django.contrib.auth import get_user_model, login
-from django.db import transaction, IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponseRedirect
 from django.utils import timezone
 from allauth.account.adapter import DefaultAccountAdapter
@@ -9,8 +19,9 @@ from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialAccount
 from ledger.models import UserAccess
-from . import flows
-from .audit import record
+
+from . import flows, signup
+from .audit import record, record_user
 
 GOOGLE = 'google'
 ROLES = ('secretary', 'auditor')
@@ -27,6 +38,8 @@ class AccountAdapter(DefaultAccountAdapter):
         user_email = flows.clean(user.email)
         if not flows.same(user_email, email):
             return False
+        # An address merely present on a form is never verified. It counts only
+        # if Google has just proven this exact address in this session.
         if not flows.same(request.session.get(flows.LOGGED_IN_EMAIL), user_email):
             return False
         return EmailAddress.objects.filter(user=user, email__iexact=user_email,
@@ -38,10 +51,13 @@ class AccountAdapter(DefaultAccountAdapter):
 
 class GoogleAdapter(DefaultSocialAccountAdapter):
     def is_open_for_signup(self, request, sociallogin):
+        # Neither flow may reach allauth's own signup machinery; the adapter
+        # hook below has already dealt with the attempt.
         return False
 
     def authenticate_by_email(self, sociallogin):
-        # Our explicit matching also handles legacy duplicate emails safely.
+        # Our explicit matching handles this safely; matching by address alone
+        # would let a Google round trip become an implicit password grant.
         return None
 
     def on_authentication_error(self, request, provider, error=None, exception=None, extra_context=None):
@@ -49,9 +65,9 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
 
     def reject(self, request, reason, user=None, email=''):
         """Refuse, and record the refusal against the flow that started it."""
-        from .views import login_error, signup_error
+        from .views import login_error, verify_error
         if flows.flow_of(request) == flows.SIGNUP:
-            raise ImmediateHttpResponse(signup_error(request, reason, email))
+            raise ImmediateHttpResponse(verify_error(request, reason, email))
         raise ImmediateHttpResponse(login_error(request, reason, user, email))
 
     def validate_claims(self, request, account):
@@ -71,13 +87,14 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
         verified = data.get('email_verified', data.get('verified_email')) is True
         if account.provider != GOOGLE or not account.uid:
             self.reject(request, 'missing identity claim', email=claimed)
-        if not email or not verified:
+        if not email:
+            self.reject(request, 'no email claim', email=claimed)
+        if not verified:
             self.reject(request, 'unverified email', email=claimed)
         linked = SocialAccount.objects.filter(provider=GOOGLE, uid=account.uid).first()
         if flow == flows.SIGNUP:
-            # Proving an address is not the same as joining with it. An address
-            # that is already spoken for, or an identity already in use, is
-            # refused here so that nothing at all is created.
+            # An address already spoken for, or an identity already in use, can
+            # never be proven into a signup, so nothing is created.
             if get_user_model().objects.filter(email__iexact=email).exists():
                 self.reject(request, 'account already exists', email=claimed)
             if linked:
@@ -94,36 +111,48 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
     def pre_social_login(self, request, sociallogin):
         flow = flows.flow_of(request)
         if flow == flows.SIGNUP:
-            self.verify_signup_email(request, sociallogin)
+            self.verify_signup(request, sociallogin)
         elif flow == flows.LOGIN:
             self.sign_in(request, sociallogin)
         else:
             self.reject(request, 'unknown flow', email='')
 
-    def verify_signup_email(self, request, sociallogin):
-        """Mark the address typed into the signup form as proven.
+    def verify_signup(self, request, sociallogin):
+        """Prove a pending signup's address with Google, then complete it.
 
-        This signs nobody in and creates nothing. The account and the
-        organization are still created by the ordinary signup submission,
-        which refuses to proceed without the proof this sets.
+        The address has to be verified by Google and match the one in the
+        pending signup, case-insensitively. On a match the ordinary signup
+        logic runs and creates the account; on a mismatch nothing is created
+        and the verification page offers the code instead.
         """
         claimed = self.validate_claims(request, sociallogin.account)
         email = flows.normalize(claimed)
         if sociallogin.state.get('process', 'login') != 'login':
             self.reject(request, 'invalid login process', email=claimed)
-        typed = flows.normalize(request.session.get(flows.PENDING))
-        if not typed:
-            self.reject(request, 'no signup email', email=claimed)
-        if typed != email:
-            # The address being proven is not the one being registered.
-            self.reject(request, 'email mismatch', email=claimed)
-        request.session[flows.SIGNUP_UID] = sociallogin.account.uid
-        flows.grant(request, email)
-        flows.finish(request, flows.SIGNUP)
-        raise ImmediateHttpResponse(HttpResponseRedirect('/signup/'))
+        pending = signup.current(request)
+        if pending is None:
+            self.reject(request, 'no pending signup', email=claimed)
+        if pending.email.casefold() != email:
+            # The address being proven is not the address being registered.
+            # Nothing is created; the page offers the emailed code instead.
+            from .views import verify_error
+            raise ImmediateHttpResponse(
+                verify_error(request, 'email mismatch', email=claimed))
+        request.session[signup.GOOGLE_UID] = sociallogin.account.uid
+        try:
+            signup.complete(request, pending, GOOGLE)
+        except signup.AlreadyVerified:
+            self.reject(request, 'signup already completed', email=claimed)
+        except signup.Invalid as error:
+            self.reject(request, str(error), email=claimed)
+        raise ImmediateHttpResponse(HttpResponseRedirect('/'))
 
     def sign_in(self, request, sociallogin):
-        """Open an existing account whose address Google has verified."""
+        """Open an existing account whose address Google has verified.
+
+        Nothing is ever created here. An address with no account behind it is a
+        refusal, not a signup.
+        """
         claimed = self.validate_claims(request, sociallogin.account)
         email = flows.normalize(claimed)
         if sociallogin.state.get('process', 'login') != 'login':
@@ -163,9 +192,6 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
                 address.verified = True
                 address.primary = not EmailAddress.objects.filter(user=user, primary=True).exclude(pk=address.pk).exists()
                 address.save()
-                if newly_linked:
-                    record(request, 'google_account_linked', user, email=email, flow=flows.LOGIN)
-                record(request, 'google_login_success', user, email=email, flow=flows.LOGIN)
         except Rejected as error:
             self.reject(request, error.reason, error.user, error.email)
         except IntegrityError:
@@ -175,8 +201,12 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
         # would leave a live session if the commit itself failed.
         # Retain passwords, rotate the session/CSRF normally, and avoid all
         # allauth signup, confirmation, connection and notification views.
+        if newly_linked:
+            record_user(request, 'google_account_linked', user, method=GOOGLE, email=email)
+        record_user(request, 'google_login_success', user, method=GOOGLE, email=email)
         login(request, user, backend=BACKEND)
         request.session[flows.LOGGED_IN_EMAIL] = email.lower()
+        flows.finish(request, flows.LOGIN)
         raise ImmediateHttpResponse(HttpResponseRedirect('/'))
 
 

@@ -1,4 +1,4 @@
-"""Authentication audit; never attribute an unknown person to a tenant."""
+"""Authentication and verification audit; never attribute an unknown person to a tenant."""
 import ipaddress
 import json
 import logging
@@ -26,46 +26,57 @@ def client_ip(request):
         return ''
 
 
-def details_for(request, reason, flow=''):
+def details_for(request, method='', reason=''):
     details = {'provider': 'google', 'ip': client_ip(request),
                'timestamp': timezone.now().isoformat()}
+    if method:
+        details['method'] = method
     if reason:
         details['reason'] = reason
-    if flow:
-        details['flow'] = flow
     return details
 
 
-def record(request, action, user=None, reason=None, email='', flow=''):
-    """Write one authentication event to the trail it can honestly belong to.
+def record_user(request, action, user, method='', **extra):
+    """Write an event for somebody who is a member of an organization.
 
-    A rejection by a known member belongs to that member's organization and is
-    stored in ``ledger.AuditEvent`` like every other ledger event. Anything
-    else -- an unknown address, an unverified claim, an unconfigured provider,
-    an account with no membership -- belongs to no organization and is stored
-    in ``GoogleAuthRejection``. No organization is ever invented or borrowed.
-
-    ``email`` is the address Google presented, which may belong to a person
-    who has no account here; it is recorded so that repeated attempts against
-    one address can be correlated. ``flow`` records which entry point the
-    attempt came from, so a refusal to verify a signup address is never
-    confused with a refusal to sign in.
+    Goes to ``ledger.AuditEvent`` like every other ledger event: same table,
+    same columns, same shape. Nothing about that table changes to accommodate
+    Google.
     """
-    details = details_for(request, reason, flow)
-    access = UserAccess.objects.filter(user=user).first() if user else None
+    details = {**details_for(request, method), **extra}
+    access = UserAccess.objects.filter(user=user).first()
+    if not access:
+        # Without a membership there is no organization to file this under, and
+        # inventing one would be a lie. Fall back to the tenantless table.
+        return record(request, 'google_no_tenant', user, reason='no membership', method=method)
     try:
-        if access:
-            AuditEvent.objects.create(organization_id=access.organization_id,
-                actor=user, action=action, entity='User',
-                entity_id=str(user.pk), details=json.dumps(details))
-        else:
-            GoogleAuthRejection.objects.create(
-                action=action, reason=reason or '', flow=flow,
-                email=(email or '')[:254], user=user, ip=details['ip'])
-            logger.warning('%s %s', action, json.dumps(
-                {**details, 'email': email, 'user': user.pk if user else None,
-                 'organization': None}))
+        AuditEvent.objects.create(organization_id=access.organization_id,
+            actor=user, action=action, entity='User', entity_id=str(user.pk),
+            details=json.dumps(details))
     except Exception:
-        # An audit failure must never turn a refused sign-in into a crash page,
-        # nor undo a sign-in that has already been completed.
+        # An audit failure must never undo a sign-up that has already committed,
+        # nor turn a refusal into a crash page.
+        logger.exception('Could not persist %s', action)
+
+
+def record(request, action, user=None, reason='', email='', flow='', method=''):
+    """Write a refusal, for which no organization exists and none may be made.
+
+    ``flow`` records which entry point the attempt came from, so a refused
+    verification is never confused with a refused sign-in. ``method`` records
+    how a signup address was being proven, 'google' or 'code'.
+
+    The address is recorded because repeated attempts against one address are
+    worth correlating, but it may belong to a person with no account here.
+    """
+    details = details_for(request, method, reason)
+    try:
+        GoogleAuthRejection.objects.create(
+            action=action, reason=(reason or '')[:60], flow=flow, method=method,
+            email=(email or '')[:254], user=user, ip=details['ip'])
+        logger.warning('%s %s', action, json.dumps(
+            {**details, 'flow': flow, 'email': email, 'user': user.pk if user else None,
+             'organization': None}))
+    except Exception:
+        # A refused sign-in must still be a refused sign-in if the log is down.
         logger.exception('Could not persist %s', action)

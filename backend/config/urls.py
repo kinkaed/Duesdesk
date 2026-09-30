@@ -6,12 +6,14 @@ from ledger import views, organization_views as org_views
 
 urlpatterns = [
     path('accounts/google/login/', google_views.google_login, name='google_login'),
+    # The one callback for both Google flows. The session, set by the entry
+    # point above, decides whether this verifies a signup or opens an account.
     path('accounts/google/login/callback/', google_views.google_login_callback, name='google_callback'),
-    path('accounts/google/signup-verify/', google_views.google_signup_verify, name='google_signup_verify'),
-    path('accounts/google/signup-verify/callback/', google_views.google_signup_verify_callback, name='google_signup_verify_callback'),
+    path('accounts/google/verify/', google_views.google_verify, name='google_verify'),
+    path('signup/verify/', google_views.verify, name='verify_email'),
     path('', views.home),
     path('api/session/', views.session_info),
-    path('login/', auth.LoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
+    path('login/', google_views.LoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
     path('logout/', auth.LogoutView.as_view()),
     path('signup/', org_views.signup, name='signup'),
     path('account/password/', auth.PasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),

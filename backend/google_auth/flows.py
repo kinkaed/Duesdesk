@@ -1,128 +1,86 @@
-"""Server-side state for the two Google flows.
+"""Server-side state for the two things Google is used for.
 
-Google does two unrelated things here, so it needs two entry points, two
-callbacks and a strict record of which one a browser is in the middle of.
-The flow is read from the session only. Nothing in here is ever taken from a
-query parameter, a form field or the client, so the signup callback can never
-log anybody in and the login callback can never start a signup.
+Google proves an address for a signup, or it opens an account that already
+exists. Those are different jobs and must never be confused for one another,
+so a browser can only be in one of them at a time and the flow is read from the
+session and nowhere else. No query parameter, form field or header can select a
+flow, which is what makes it impossible for the login callback to complete a
+signup or for the verification callback to sign anybody in.
 """
-from datetime import timedelta
-
 from django.utils import timezone
 
 LOGIN = 'login'
 SIGNUP = 'signup'
 
-FLOW = 'google_flow'                    # which entry point this session started
-PENDING = 'signup_email_verification'   # the address typed into the signup form
-VERIFIED = 'verified_signup_email'      # {'email': ..., 'at': iso}
-LOGIN_FLAG = 'google_login'             # set by the login entry point
+FLOW = 'google_flow'                     # which entry point this session started
+LOGIN_FLAG = 'google_login'              # set by the login entry point
+# The address Google has just proven, held for the length of the session and
+# used by the account adapter to decide an address may count as verified.
 LOGGED_IN_EMAIL = 'google_verified_email'
-SIGNUP_UID = 'signup_google_uid'        # Google's identity, to link at signup
-SIGNUP_ERROR = 'google_signup_error'    # message shown on the signup page
-INVITE = 'signup_invite'
+PENDING_TOKEN = 'pending_signup'         # the handle for the PendingSignup being verified
+# The raw invitation token behind a pending signup. Only its hash is stored with
+# the record, so this is what lets "wrong email, go back" return to the
+# invitation the secretary arrived with.
+INVITE = 'pending_signup_invite'
+# The 30-minute logo preview token behind a pending signup. The preview token is
+# signed for this session, so it is held here to put the logo back on the form
+# if the secretary goes back from the verification page.
+LOGO = 'pending_signup_logo'
+SIGNUP_ERROR = 'verify_error'            # a message shown on the verification page
+CODE_ERROR = 'verify_code_error'
+# What the secretary typed, kept so "wrong email, go back" does not lose it.
+RETURN = 'signup_return'
 
-TTL = timedelta(minutes=15)
-
-# Verdicts returned by verification().
-OK = 'ok'
-MISSING = 'missing'
-EXPIRED = 'expired'
-MISMATCH = 'mismatch'
+# The single Google callback. Both flows land here and are told apart by FLOW.
+CALLBACK = '/accounts/google/login/callback/'
 
 
-def clean(email):
-    """An address as it should be stored and shown: trimmed, casing intact."""
-    return str(email or '').strip()
+def clean(value):
+    """A trimmed, lowercased address, or '' for anything unusable."""
+    return (value or '').strip().lower() if isinstance(value, str) else ''
 
 
-def normalize(email):
-    """The comparison key for an address, which mail treats case-insensitively."""
-    return clean(email).casefold()
+def normalize(value):
+    return clean(value)
 
 
 def same(left, right):
-    """Compare two addresses case-insensitively, but without trimming.
-
-    Whitespace stays significant on purpose. An address carrying a stray space
-    is not the address that was proven, and treating it as the same one would
-    widen a verification grant that was made for an exact string.
-    """
-    return bool(left) and str(left).casefold() == str(right or '').casefold()
+    return bool(clean(left)) and clean(left) == clean(right)
 
 
-def begin(request, flow):
-    """Start a flow, discarding any proof left over from an earlier one."""
-    for key in (PENDING, VERIFIED, LOGIN_FLAG, SIGNUP_UID):
+def begin_login(request):
+    """Enter the sign-in flow, discarding anything left over from a signup."""
+    for key in (PENDING_TOKEN, INVITE, LOGO, LOGIN_FLAG, SIGNUP_ERROR, CODE_ERROR):
         request.session.pop(key, None)
-    request.session[FLOW] = flow
-    if flow == LOGIN:
-        request.session[LOGIN_FLAG] = timezone.now().isoformat()
+    request.session[FLOW] = LOGIN
+    request.session[LOGIN_FLAG] = timezone.now().isoformat()
+
+
+def begin_signup(request, token):
+    """Enter the verification flow for one pending signup."""
+    for key in (PENDING_TOKEN, LOGIN_FLAG, SIGNUP_ERROR, CODE_ERROR):
+        request.session.pop(key, None)
+    request.session[FLOW] = SIGNUP
+    request.session[PENDING_TOKEN] = token
 
 
 def flow_of(request):
     return request.session.get(FLOW)
 
 
-def is_flow(request, flow):
-    return request.session.get(FLOW) == flow
+def finish(request, flow, clear_invite=True):
+    """Leave a flow, clearing its state whether it succeeded or not.
 
-
-def finish(request, flow):
+    ``clear_invite`` is off for "wrong email, go back", where the invitation and
+    the logo are still what this browser is signing up against and must survive
+    the trip through the verification page.
+    """
     if request.session.get(FLOW) == flow:
         request.session.pop(FLOW, None)
-
-
-def expired(at):
-    try:
-        moment = timezone.datetime.fromisoformat(at)
-    except (TypeError, ValueError):
-        return True
-    if timezone.is_naive(moment):
-        moment = timezone.make_aware(moment, timezone.get_current_timezone())
-    return moment < timezone.now() - TTL
-
-
-def grant(request, email):
-    request.session[VERIFIED] = {'email': normalize(email), 'at': timezone.now().isoformat()}
-
-
-def verification(request, email):
-    """Classify the stored proof against the address being submitted.
-
-    Returns ``OK`` only for an unexpired proof of exactly this address, so a
-    secretary who edits the email field after verifying must verify again.
-    """
-    entry = request.session.get(VERIFIED)
-    if not isinstance(entry, dict) or not entry.get('email'):
-        return MISSING
-    if expired(entry.get('at')):
-        request.session.pop(VERIFIED, None)
-        request.session.pop(SIGNUP_UID, None)
-        return EXPIRED
-    if normalize(entry['email']) != normalize(email):
-        return MISMATCH
-    return OK
-
-
-def verified_email(request):
-    """The address proven with Google, or None once it is stale.
-
-    A pure read: the signup page renders this on every GET, so it must not
-    consume or discard the proof. Only ``verification`` and ``begin`` clear it.
-    """
-    entry = request.session.get(VERIFIED)
-    if not isinstance(entry, dict) or not entry.get('email'):
-        return ''
-    if expired(entry.get('at')):
-        return ''
-    return normalize(entry['email'])
-
-
-def signup_uid(request):
-    return request.session.get(SIGNUP_UID) or ''
-
-
-def clear_signup(request):
-    for key in (PENDING, VERIFIED, SIGNUP_UID, FLOW):
-        request.session.pop(key, None)
+    if flow == SIGNUP:
+        request.session.pop(PENDING_TOKEN, None)
+        if clear_invite:
+            request.session.pop(INVITE, None)
+            request.session.pop(LOGO, None)
+    else:
+        request.session.pop(LOGIN_FLAG, None)
