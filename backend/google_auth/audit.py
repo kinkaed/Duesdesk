@@ -26,15 +26,17 @@ def client_ip(request):
         return ''
 
 
-def details_for(request, reason):
+def details_for(request, reason, flow=''):
     details = {'provider': 'google', 'ip': client_ip(request),
                'timestamp': timezone.now().isoformat()}
     if reason:
         details['reason'] = reason
+    if flow:
+        details['flow'] = flow
     return details
 
 
-def record(request, action, user=None, reason=None, email=''):
+def record(request, action, user=None, reason=None, email='', flow=''):
     """Write one authentication event to the trail it can honestly belong to.
 
     A rejection by a known member belongs to that member's organization and is
@@ -45,9 +47,11 @@ def record(request, action, user=None, reason=None, email=''):
 
     ``email`` is the address Google presented, which may belong to a person
     who has no account here; it is recorded so that repeated attempts against
-    one address can be correlated.
+    one address can be correlated. ``flow`` records which entry point the
+    attempt came from, so a refusal to verify a signup address is never
+    confused with a refusal to sign in.
     """
-    details = details_for(request, reason)
+    details = details_for(request, reason, flow)
     access = UserAccess.objects.filter(user=user).first() if user else None
     try:
         if access:
@@ -56,8 +60,8 @@ def record(request, action, user=None, reason=None, email=''):
                 entity_id=str(user.pk), details=json.dumps(details))
         else:
             GoogleAuthRejection.objects.create(
-                action=action, reason=reason or '', email=(email or '')[:254],
-                user=user, ip=details['ip'])
+                action=action, reason=reason or '', flow=flow,
+                email=(email or '')[:254], user=user, ip=details['ip'])
             logger.warning('%s %s', action, json.dumps(
                 {**details, 'email': email, 'user': user.pk if user else None,
                  'organization': None}))

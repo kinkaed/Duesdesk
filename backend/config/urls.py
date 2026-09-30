@@ -6,7 +6,9 @@ from ledger import views, organization_views as org_views
 
 urlpatterns = [
     path('accounts/google/login/', google_views.google_login, name='google_login'),
-    path('accounts/google/login/callback/', google_views.google_callback, name='google_callback'),
+    path('accounts/google/login/callback/', google_views.google_login_callback, name='google_callback'),
+    path('accounts/google/signup-verify/', google_views.google_signup_verify, name='google_signup_verify'),
+    path('accounts/google/signup-verify/callback/', google_views.google_signup_verify_callback, name='google_signup_verify_callback'),
     path('', views.home),
     path('api/session/', views.session_info),
     path('login/', auth.LoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),

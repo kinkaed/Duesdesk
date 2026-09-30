@@ -15,6 +15,7 @@ from axes.handlers.proxy import AxesProxyHandler
 from axes.models import AccessLog
 from ledger.models import Organisation, UserAccess, Member, AuditEvent, SecretaryInvite
 from .models import GoogleAuthRejection
+from .testsupport import GOOGLE_SETTINGS, GoogleTestMixin
 
 PROVIDERS = {'google': {'APP': {'client_id': 'test-client', 'secret': 'test-secret', 'key': ''},
     'SCOPE': ['openid', 'email', 'profile'], 'AUTH_PARAMS': {'access_type': 'online'}, 'OAUTH_PKCE_ENABLED': True}}
@@ -430,6 +431,25 @@ class GoogleAuthenticationTests(TestCase):
         self.assertEqual(self.client.get('/accounts/google/login/').status_code, 403)
         self.assertEqual(self.client.get('/login/').status_code, 200)
 
+    def test_the_login_page_offers_google_next_to_the_password_form(self):
+        page = self.client.get('/login/')
+
+        self.assertContains(page, 'Sign in with Google')
+        self.assertContains(page, 'href="/accounts/google/login/"')
+        self.assertContains(page, 'name="password"', count=1)
+
+    def test_a_google_refusal_explains_itself_on_the_login_page(self):
+        response = self.authenticate({'email': 'unknown@example.com'})
+
+        self.assertContains(response, 'No Duesdesk account uses that email address. Please sign up first.',
+                            status_code=403)
+        self.assertContains(response, 'Sign in with Google', status_code=403)
+
+    def test_a_bad_password_still_gets_its_own_explanation(self):
+        response = self.client.post('/login/', {'username': self.user.username, 'password': 'wrong'})
+
+        self.assertContains(response, 'The username or password is incorrect')
+
     def test_other_email_fields_are_not_marked_verified(self):
         self.authenticate()
         self.assertFalse(EmailAddress.objects.filter(email__iexact=self.other.email).exists())
@@ -568,3 +588,251 @@ class VerifiedEmailHelperTests(TestCase):
     def test_signup_is_always_closed(self):
         self.assertFalse(self.adapter.is_open_for_signup(self.request()))
 
+
+@override_settings(**GOOGLE_SETTINGS)
+class SignupVerificationFlowTests(GoogleTestMixin, TestCase):
+    """Verifying an address for signup proves nothing beyond the address.
+
+    The separation that matters here: this flow must never sign anybody in, and
+    it must never create a user, an organization or a membership. Only the
+    ordinary signup submission does that, and only with a current proof in hand.
+    """
+
+    def setUp(self):
+        self.org = Organisation.objects.create(name='Organization A')
+        self.user = get_user_model().objects.create_user('secretary', email='secretary@example.com',
+                                                         password='ExistingPassword25!')
+        UserAccess.objects.create(user=self.user, organization=self.org, role='secretary')
+        self.org_count = Organisation.objects.count()
+        self.signup = {'organization_name': 'New Organization', 'username': 'new-signup',
+                       'email': 'new-signup@example.com', 'password1': 'A-Very-Strong-Signup-Password!',
+                       'password2': 'A-Very-Strong-Signup-Password!'}
+
+    def test_verification_creates_nothing_and_signs_nobody_in(self):
+        self.assertEqual(self.verify_signup_email('new-signup@example.com').status_code, 302)
+
+        self.assertNotIn('_auth_user_id', self.client.session)
+        self.assertEqual(Organisation.objects.count(), self.org_count)
+        self.assertFalse(get_user_model().objects.filter(email__iexact='new-signup@example.com').exists())
+        self.assertFalse(UserAccess.objects.filter(role='secretary').count() > 1)
+        self.assertFalse(SocialAccount.objects.exists())
+
+    def test_verification_returns_to_signup_rather_than_the_app(self):
+        response = self.verify_signup_email('new-signup@example.com')
+
+        self.assertEqual(response['Location'], '/signup/')
+        # Back on the signup page, still anonymous: verification alone opens nothing.
+        self.assertRedirects(self.client.get('/'), '/login/?next=%2F', fetch_redirect_response=False)
+
+    def test_verification_stores_only_the_email_and_the_identity(self):
+        self.verify_signup_email('new-signup@example.com', uid='google-uid-1')
+        session = self.client.session
+
+        self.assertEqual(session.get('google_flow'), None)  # the flow is finished
+        self.assertEqual(session['signup_google_uid'], 'google-uid-1')
+        self.assertEqual(session['verified_signup_email']['email'], 'new-signup@example.com')
+        self.assertNotIn('access_token', session.get('verified_signup_email', {}))
+        self.assertNotIn('google_login', session)
+
+    def test_a_proof_only_covers_the_address_that_was_typed(self):
+        # Google proves whatever address the person actually owns. Proving it
+        # says nothing about a second address typed into the form afterwards.
+        self.verify_signup_email('new-signup@example.com')
+
+        response = self.client.post('/signup/', {**self.signup, 'email': 'other@example.com'})
+
+        self.assertContains(response, 'Verify this email address with Google')
+        self.assertFalse(get_user_model().objects.filter(username='new-signup').exists())
+
+    def test_proof_matches_case_insensitively(self):
+        self.verify_signup_email('New-Signup@example.com')
+
+        response = self.client.post('/signup/', {**self.signup, 'email': 'NEW-SIGNUP@Example.com'})
+
+        self.assertEqual(response.status_code, 302, response.content[:300])
+
+    def test_verification_of_an_existing_account_is_refused(self):
+        # Verifying is not a way in. An address that already has an account can
+        # be verified, but only the sign-in flow may open that account.
+        response = self.verify_signup_email('secretary@example.com')
+
+        # The signup route refuses and hands the reason back to the signup page.
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/signup/')
+        self.assertNotIn('verified_signup_email', self.client.session)
+        self.assertEqual(GoogleAuthRejection.objects.get().reason, 'account already exists')
+        self.assertEqual(GoogleAuthRejection.objects.get().flow, 'signup')
+
+    def test_verification_with_an_already_linked_identity_is_refused(self):
+        SocialAccount.objects.create(provider='google', uid='google-uid-1', user=self.user,
+                                     extra_data={'email': 'secretary@example.com'})
+
+        response = self.verify_signup_email('new-signup@example.com', uid='google-uid-1')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn('verified_signup_email', self.client.session)
+        self.assertEqual(GoogleAuthRejection.objects.get().reason, 'identity already linked')
+        self.assertEqual(SocialAccount.objects.count(), 1)
+
+    def test_unverified_claim_is_refused_in_the_signup_flow(self):
+        entry = self.client.post('/accounts/google/signup-verify/', {'email': 'new-signup@example.com'})
+        state = parse_qs(urlparse(entry.url).query)['state'][0]
+
+        response = self.google_callback(state, self.google_claims('new-signup@example.com',
+                                                                  email_verified=False),
+                                        callback='/accounts/google/signup-verify/callback/')
+
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn('verified_signup_email', self.client.session)
+        rejection = GoogleAuthRejection.objects.get()
+        self.assertEqual(rejection.reason, 'unverified email')
+        self.assertEqual(rejection.flow, 'signup')
+
+    def test_signup_entry_needs_an_email_to_verify(self):
+        response = self.client.post('/accounts/google/signup-verify/', {'email': ''})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/signup/')
+        self.assertEqual(self.client.session['google_signup_error'],
+                         'Enter your email address, then verify it with Google.')
+
+    def test_a_refusal_is_shown_on_the_signup_page_and_creates_nothing(self):
+        self.verify_signup_email('secretary@example.com')
+
+        page = self.client.get('/signup/')
+
+        self.assertContains(page, 'An account already exists for this email')
+        self.assertContains(page, 'href="/login/"')
+        self.assertFalse(get_user_model().objects.filter(username='new-signup').exists())
+
+    def test_the_signin_callback_cannot_verify_for_signup(self):
+        state = self.begin()
+
+        response = self.finish(state, {'email': 'new-signup@example.com'})
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn('verified_signup_email', self.client.session)
+        self.assertFalse(get_user_model().objects.filter(email__iexact='new-signup@example.com').exists())
+
+    def test_the_signup_callback_cannot_sign_anybody_in(self):
+        # An existing account must not be opened by aiming its callback at the
+        # signup route, even with a matching, verified claim.
+        entry = self.client.post('/accounts/google/signup-verify/',
+                                 {'email': 'secretary@example.com'})
+        state = parse_qs(urlparse(entry.url).query)['state'][0]
+
+        response = self.google_callback(state, self.google_claims('secretary@example.com'),
+                                        callback='/accounts/google/login/callback/')
+
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_starting_signup_discards_a_login_in_progress(self):
+        self.begin()
+        self.assertIn('google_login', self.client.session)
+
+        self.client.post('/accounts/google/signup-verify/', {'email': 'new-signup@example.com'})
+
+        session = self.client.session
+        self.assertEqual(session['google_flow'], 'signup')
+        self.assertNotIn('google_login', session)
+
+    def test_starting_login_discards_an_unfinished_signup_proof(self):
+        self.verify_signup_email('new-signup@example.com')
+        self.assertIn('verified_signup_email', self.client.session)
+
+        self.begin()
+
+        self.assertNotIn('verified_signup_email', self.client.session)
+        self.assertNotIn('signup_google_uid', self.client.session)
+
+    def test_a_callback_with_no_flow_is_refused(self):
+        state = self.begin()
+        session = self.client.session
+        session['google_flow'] = 'signup'
+        session.save()
+        # A login callback arriving with the flow tampered with must not act.
+        response = self.finish(state, {'email': 'secretary@example.com'})
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_address_verified_at_signup_can_sign_in_later(self):
+        self.assertEqual(self.signup_with_google(self.signup).status_code, 302)
+        user = get_user_model().objects.get(username='new-signup')
+        self.client.logout()
+
+        state = self.begin()
+        response = self.finish(state, {'email': 'New-Signup@example.com', 'sub': 'google-signup-1'})
+
+        self.assertRedirects(response, '/', fetch_redirect_response=False)
+        self.assertEqual(self.client.session['_auth_user_id'], str(user.pk))
+        self.assertEqual(AuditEvent.objects.filter(action='google_login_success').count(), 1)
+        self.assertEqual(SocialAccount.objects.filter(user=user, provider='google').count(), 1)
+
+    def test_the_identity_linked_at_signup_is_reused_rather_than_duplicated(self):
+        self.assertEqual(self.signup_with_google(self.signup, uid='google-signup-1').status_code, 302)
+        user = get_user_model().objects.get(username='new-signup')
+        self.client.logout()
+
+        self.finish(self.begin(), {'email': 'new-signup@example.com', 'sub': 'google-signup-1'})
+
+        self.assertEqual(SocialAccount.objects.filter(user=user, provider='google').count(), 1)
+        self.assertEqual([e.action for e in AuditEvent.objects.filter(action='google_account_linked')],
+                         [])
+
+    def test_signup_never_stores_a_token(self):
+        self.assertEqual(self.signup_with_google(self.signup).status_code, 302)
+
+        identity = SocialAccount.objects.get(provider='google')
+        self.assertEqual(identity.extra_data, {'email': 'new-signup@example.com', 'email_verified': True})
+        self.assertFalse(SocialToken.objects.exists())
+
+    def test_the_signup_flow_records_its_own_audit_action(self):
+        self.assertEqual(self.signup_with_google(self.signup).status_code, 302)
+        user = get_user_model().objects.get(username='new-signup')
+
+        event = AuditEvent.objects.get(action='signup_email_verified_google')
+        self.assertEqual(event.organization_id, user.access.organization_id)
+        self.assertEqual(event.actor, user)
+        details = json.loads(event.details)
+        self.assertEqual(details['flow'], 'signup')
+        self.assertEqual(details['ip'], '127.0.0.1')
+        self.assertEqual(GoogleAuthRejection.objects.count(), 0)
+
+    def test_a_tampered_proof_timestamp_cannot_unexpire_itself(self):
+        self.verify_signup_email('new-signup@example.com')
+        session = self.client.session
+        session['verified_signup_email'] = {'email': 'new-signup@example.com', 'at': 'not a timestamp'}
+        session.save()
+
+        response = self.client.post('/signup/', self.signup)
+
+        self.assertContains(response, 'has expired')
+        self.assertFalse(get_user_model().objects.filter(username='new-signup').exists())
+
+    def test_a_proof_for_someone_else_cannot_be_replayed(self):
+        self.verify_signup_email('new-signup@example.com')
+        session = self.client.session
+        session['verified_signup_email'] = 'new-signup@example.com'
+        session.save()
+
+        response = self.client.post('/signup/', self.signup)
+
+        self.assertContains(response, 'Verify this email address with Google')
+        self.assertFalse(get_user_model().objects.filter(username='new-signup').exists())
+
+    def test_the_signup_button_does_not_submit_the_signup_form(self):
+        # The Google control lives inside the signup form but has to leave it.
+        # signup.js grabs the first submit button, so this must be an input, and
+        # it must carry its own action rather than the form's.
+        html = self.client.get('/signup/').content.decode()
+
+        self.assertIn('formaction="/accounts/google/signup-verify/"', html)
+        self.assertNotIn('<button class="secondary" formaction', html)
+
+    def test_a_verified_signup_page_hides_the_button_and_shows_the_address(self):
+        self.verify_signup_email('new-signup@example.com')
+        html = self.client.get('/signup/').content.decode()
+
+        self.assertIn('Verified', html)
+        self.assertNotIn('Verify email with Google', html)
+        self.assertIn('new-signup@example.com', html)

@@ -20,6 +20,8 @@ class GoogleAuthRejection(models.Model):
     provider = models.CharField(max_length=32, default='google')
     action = models.CharField(max_length=60)
     reason = models.CharField(max_length=60)
+    # Which entry point the browser had started: 'login' or 'signup'.
+    flow = models.CharField(max_length=16, blank=True, default='')
     # The address presented by Google; blank when the claim was missing or unusable.
     email = models.CharField(max_length=254, blank=True, default='')
     # Populated only when the attempt resolved to an account this server owns.

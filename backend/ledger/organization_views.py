@@ -13,6 +13,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from django.core.validators import validate_email
 from .models import Organisation, UserAccess, SecretaryInvite
 from .access import organization_for, role_for
+from google_auth import flows as google_flows, signup as google_signup
 
 logger = logging.getLogger(__name__)
 from .branding import DEFAULTS, branding_json, decode_logo, logo_token, read_logo_token, color
@@ -63,40 +64,51 @@ def signup(request):
     token=request.GET.get('invite','')
     invite=valid_invite(token) if token else None
     if token and not invite:return render(request,'registration/invite_invalid.html',status=400)
-    form=SignupForm(request.POST or None)
+    proved=google_signup.verified_email(request)
+    form=SignupForm(request.POST or None,initial={'email':proved} if proved and not request.POST else None)
     org_name=request.POST.get('organization_name','').strip()
     owner=preview_owner(request)
     if request.method=='POST' and form.is_valid():
-        try:
-            with transaction.atomic():
-                if token:
-                    # Serialize invitations and membership changes on the organization row.
-                    org=Organisation.objects.select_for_update().get(pk=invite.organization_id)
-                    locked=SecretaryInvite.objects.select_for_update().get(pk=invite.pk)
-                    if locked.used_at or locked.revoked_at or locked.expires_at<=timezone.now():
-                        raise ValueError('This invitation is no longer valid.')
-                    if form.cleaned_data['email'].casefold()!=locked.email.casefold():
-                        raise ValueError('Use the email address named in your invitation.')
-                else:
-                    if not org_name:raise ValueError('Enter an organization name.')
-                    org=Organisation(name=org_name)
-                    for field,default in DEFAULTS.items():setattr(org,field,color(request.POST.get(field,default)))
-                    if request.POST.get('logo_token'):org.logo=read_logo_token(request.POST['logo_token'],owner)
-                    org.full_clean();org.save()
-                user=form.save()
-                UserAccess.objects.create(user=user,organization=org,role='secretary')
-                if token:
-                    locked.used_at=timezone.now();locked.used_by=user;locked.save(update_fields=['used_at','used_by'])
-                audit(user,'organization.joined' if token else 'organization.created',org)
-            login(request,user,backend='django.contrib.auth.backends.ModelBackend')
-            return redirect('/')
-        except (ValueError,ValidationError) as error:form.add_error(None, str(error))
-        except IntegrityError:
-            # This used to collapse every database conflict into one sentence with
-            # nothing in the log, which made signup failures undiagnosable.
-            logger.exception('IntegrityError during signup invite=%s', bool(token))
-            form.add_error(None,'This account or invitation has already been used. Please sign in or request a new invitation.')
-    context={'form':form,'invite':invite,'organization_name':org_name,
+        # Google proves the address; it never creates the account. Without a
+        # current proof of this exact address, signup does not run at all.
+        problem=google_signup.block(request,form.cleaned_data['email'])
+        if problem:form.add_error(None,problem)
+        else:
+            try:
+                with transaction.atomic():
+                    if token:
+                        # Serialize invitations and membership changes on the organization row.
+                        org=Organisation.objects.select_for_update().get(pk=invite.organization_id)
+                        locked=SecretaryInvite.objects.select_for_update().get(pk=invite.pk)
+                        if locked.used_at or locked.revoked_at or locked.expires_at<=timezone.now():
+                            raise ValueError('This invitation is no longer valid.')
+                        if form.cleaned_data['email'].casefold()!=locked.email.casefold():
+                            raise ValueError('Use the email address named in your invitation.')
+                    else:
+                        if not org_name:raise ValueError('Enter an organization name.')
+                        org=Organisation(name=org_name)
+                        for field,default in DEFAULTS.items():setattr(org,field,color(request.POST.get(field,default)))
+                        if request.POST.get('logo_token'):org.logo=read_logo_token(request.POST['logo_token'],owner)
+                        org.full_clean();org.save()
+                    user=form.save()
+                    UserAccess.objects.create(user=user,organization=org,role='secretary')
+                    if token:
+                        locked.used_at=timezone.now();locked.used_by=user;locked.save(update_fields=['used_at','used_by'])
+                    audit(user,'organization.joined' if token else 'organization.created',org)
+                    google_signup.complete(request,user)
+                login(request,user,backend='django.contrib.auth.backends.ModelBackend')
+                return redirect('/')
+            except (ValueError,ValidationError) as error:form.add_error(None, str(error))
+            except IntegrityError:
+                # This used to collapse every database conflict into one sentence with
+                # nothing in the log, which made signup failures undiagnosable.
+                logger.exception('IntegrityError during signup invite=%s', bool(token))
+                form.add_error(None,'This account or invitation has already been used. Please sign in or request a new invitation.')
+    # A refusal from the Google round trip is shown on this page, which is also
+    # reached by plain GET, so it goes in the context rather than on the form.
+    refused=request.session.pop(google_flows.SIGNUP_ERROR,None)
+    context={'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
+             'google_signup_verified':proved,'google_signup_error':refused,
              'palette':{k:request.POST.get(k,v) for k,v in DEFAULTS.items()},'logo_token':request.POST.get('logo_token','')}
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))
     return render(request,'registration/signup.html',context)
@@ -112,6 +124,8 @@ def invites(request):
         return JsonResponse({'invites':[{'id':x.pk,'email':x.email,'expires_at':x.expires_at.isoformat(),
             'status':'Used' if x.used_at else 'Revoked' if x.revoked_at else 'Expired' if x.expires_at<=timezone.now() else 'Pending'} for x in rows]})
     email=str(body(request).get('email','')).strip().lower();validate_email(email)
+    pending=SecretaryInvite.objects.filter(organization=org,email__iexact=email,used_at__isnull=True,revoked_at__isnull=True,expires_at__gt=timezone.now()).exists()
+    if pending:raise ValueError('A pending invitation already exists for this email. Revoke it to send a new one.')
     raw=secrets.token_urlsafe(32)
     item=SecretaryInvite.objects.create(organization=org,email=email,token_hash=token_hash(raw),created_by=request.user,expires_at=timezone.now()+timedelta(days=7))
     audit(request.user,'invite.created',item,{'email':email})
