@@ -948,6 +948,9 @@ class AuditReadDesignTests(TestCase):
         self.assertEqual(row['changes'], [{'field': 'full_name', 'from': 'Ada', 'to': 'Ada Lovelace'}])
         for key in ('http_method', 'path', 'user_agent', 'ip_address'):
             self.assertIn(key, row)
+        # The page needs to know the recorded address is the peer's socket
+        # address and not the member's when a proxy is trusted.
+        self.assertIn('ip_is_peer', row)
 
     def test_the_detail_endpoint_cannot_read_another_tenants_event(self):
         # A 404, not a 403: saying "forbidden" would confirm the row exists.

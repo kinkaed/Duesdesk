@@ -17,7 +17,7 @@ export type AuditEvent={id:number;date:string;actor:string;actor_role:string;act
 export type AuditChange={field:string;from:unknown;to:unknown};
 // The detail response is the list row plus everything the list withholds, and
 // the events that happened during the same request.
-export type AuditDetail=AuditEvent&{details:Record<string,unknown>;changes:AuditChange[];related:AuditEvent[];http_method:string;path:string;ip_address:string|null;user_agent:string};
+export type AuditDetail=AuditEvent&{details:Record<string,unknown>;changes:AuditChange[];related:AuditEvent[];http_method:string;path:string;ip_address:string|null;ip_is_peer:boolean;user_agent:string};
 export type AuditOption={id:string;label:string};
 export type AuditActionMeta={label:string;category:string;severity:AuditSeverity};
 export type AuditTaxonomy={actions:Record<string,AuditActionMeta>;categories:AuditOption[];outcomes:AuditOption[];severities:AuditSeverity[]};

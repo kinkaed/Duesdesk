@@ -146,6 +146,15 @@ SECURE_REFERRER_POLICY = 'same-origin'
 TRUST_PROXY = os.environ.get('TRUST_PROXY', '0') == '1'
 if TRUST_PROXY:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# Which peer the reverse proxy must come from, and which proxy headers to
+# honour from it. waitress accepts a single address or '*', so a wildcard here
+# means "whoever reaches me". Render does not publish a proxy CIDR, and it
+# appends to X-Forwarded-For rather than replacing it, so x-forwarded-for must
+# never be honoured while TRUSTED_PROXY_IP is '*': the first value in that
+# header is attacker-chosen. deployment_check refuses that combination.
+TRUSTED_PROXY_IP = os.environ.get('TRUSTED_PROXY_IP', '127.0.0.1')
+TRUSTED_PROXY_HEADERS = csv_values(
+    os.environ.get('TRUSTED_PROXY_HEADERS', 'x-forwarded-proto'))
 X_FRAME_OPTIONS = 'DENY'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2097152
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2097152

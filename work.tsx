@@ -246,7 +246,7 @@ function AuditRow({event,onDrill}:{event:AuditEvent;onDrill:(requestId:string)=>
         {(detail.entity||detail.resource)&&<AuditSection heading="Affected record"><dl className="audit-facts">{detail.entity&&<div><dt>Type</dt><dd>{fieldName(detail.entity)}</dd></div>}{detail.resource&&<div><dt>Record</dt><dd>{detail.resource}</dd></div>}</dl></AuditSection>}
         {detail.changes.length>0&&<AuditSection heading="What changed"><AuditChanges changes={detail.changes}/></AuditSection>}
         {detail.request_id&&detail.related.length>0&&<AuditSection heading="Saved at the same time"><button className="text-button" onClick={()=>onDrill(detail.request_id)}>Show all {detail.related_count} events from this save</button><ul className="audit-related">{detail.related.map(r=><li key={r.id}><span className={'audit-rail severity-'+r.severity} aria-hidden="true"/><span>{r.label}</span><time dateTime={r.date}>{relativeTime(r.date)}</time></li>)}</ul></AuditSection>}
-        <AuditSection heading="Where it came from"><dl className="audit-facts"><div><dt>IP address</dt><dd>{detail.ip_address||'Not recorded'}</dd></div><div><dt>Browser</dt><dd>{detail.user_agent||'Not recorded'}</dd></div></dl></AuditSection>
+        <AuditSection heading="Where it came from"><dl className="audit-facts"><div><dt>{detail.ip_is_peer?'Connection address':'IP address'}</dt><dd>{detail.ip_address||'Not recorded'}{detail.ip_is_peer&&' · the reverse proxy, not the member'}</dd></div><div><dt>Browser</dt><dd>{detail.user_agent||'Not recorded'}</dd></div></dl></AuditSection>
       </>}
     </div>}
   </li>;

@@ -54,7 +54,8 @@ test('the opened row speaks plain language, not machine values', () => {
   assert.match(detail, /<dt>Account<\/dt>/);
   assert.match(detail, /<dt>Recorded<\/dt>/);
   assert.match(detail, /<AuditChanges changes=\{detail\.changes\}\/>/);
-  assert.match(detail, /<dt>IP address<\/dt><dd>\{detail\.ip_address\|\|'Not recorded'\}<\/dd>/);
+  assert.match(detail, /<dt>\{detail\.ip_is_peer\?'Connection address':'IP address'\}<\/dt>/);
+  assert.match(detail, /<dd>\{detail\.ip_address\|\|'Not recorded'\}{detail\.ip_is_peer&&' · the reverse proxy, not the member'}<\/dd>/);
   assert.match(detail, /<dt>Browser<\/dt><dd>\{detail\.user_agent\|\|'Not recorded'\}<\/dd>/);
 });
 

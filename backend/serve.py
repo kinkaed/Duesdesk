@@ -32,6 +32,8 @@ application = get_wsgi_application()
 def main():
     from waitress import serve
 
+    from django.conf import settings
+
     host = '0.0.0.0'
     port = int(os.environ.get('PORT', '10000'))
     print(f'Serving on http://{host}:{port} (waitress)')
@@ -42,10 +44,13 @@ def main():
         'channel_timeout': 60,
         'max_request_body_size': 2097152,
     }
-    if os.environ.get('TRUST_PROXY') == '1':
+    if settings.TRUST_PROXY:
         options.update(
-            trusted_proxy=os.environ.get('TRUSTED_PROXY_IP', '127.0.0.1'),
-            trusted_proxy_headers={'x-forwarded-proto'},
+            trusted_proxy=settings.TRUSTED_PROXY_IP,
+            # The header set is configuration, not a literal, so
+            # deployment_check can refuse the combination of a wildcard proxied
+            # peer and x-forwarded-for, which Render makes trivially spoofable.
+            trusted_proxy_headers=set(settings.TRUSTED_PROXY_HEADERS),
             clear_untrusted_proxy_headers=True,
         )
     serve(application, **options)

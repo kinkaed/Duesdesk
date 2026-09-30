@@ -157,6 +157,45 @@ class ReportTests(TestCase):
         self.assertNotIn('Application checks passed', report)
 
 
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+class ProxyConfigurationTests(TestCase):
+    def command(self):
+        from .management.commands.deployment_check import Command
+        return Command()
+
+    @override_settings(TRUST_PROXY=False)
+    def test_no_proxy_is_fine(self):
+        self.command()._check_proxy()
+
+    @override_settings(TRUST_PROXY=True, TRUSTED_PROXY_IP='127.0.0.1',
+                       TRUSTED_PROXY_HEADERS=('x-forwarded-proto',))
+    def test_a_pinned_proxy_trusting_proto_is_fine(self):
+        self.command()._check_proxy()
+
+    @override_settings(TRUST_PROXY=True, TRUSTED_PROXY_IP='127.0.0.1',
+                       TRUSTED_PROXY_HEADERS=('x-forwarded-proto', 'x-forwarded-for'))
+    def test_a_pinned_proxy_can_trust_forwarded_for(self):
+        # The harm is not in trusting the header; it is in trusting it from a
+        # peer you cannot authenticate. Pinning a proxy is the legitimate case.
+        self.command()._check_proxy()
+
+    @override_settings(TRUST_PROXY=True, TRUSTED_PROXY_IP='*',
+                       TRUSTED_PROXY_HEADERS=('x-forwarded-proto', 'x-forwarded-for'))
+    def test_a_wildcard_proxy_must_not_trust_forwarded_for(self):
+        # Render appends to X-Forwarded-For rather than replacing it, so the
+        # first value is whatever the client sent. Trusting it from any peer
+        # lets any request choose the address the audit trail records.
+        with self.assertRaises(CommandError) as caught:
+            self.command()._check_proxy()
+        self.assertIn('x-forwarded-for', str(caught.exception))
+        self.assertIn('TRUSTED_PROXY_IP', str(caught.exception))
+
+    @override_settings(TRUST_PROXY=True, TRUSTED_PROXY_IP='*',
+                       TRUSTED_PROXY_HEADERS=('x-forwarded-proto',))
+    def test_a_wildcard_proxy_trusting_only_proto_is_the_ship_shape(self):
+        self.command()._check_proxy()
+
+
 @override_settings(PRODUCTION=True,
                    PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'],
                    EMAIL_HOST='smtp.example.org',

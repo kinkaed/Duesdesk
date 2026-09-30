@@ -33,9 +33,23 @@ BIND_HOST=0.0.0.0
 PORT=8000
 TRUST_PROXY=1
 TRUSTED_PROXY_IP=*
+TRUSTED_PROXY_HEADERS=x-forwarded-proto
 ```
 
-`TRUSTED_PROXY_IP=*` is appropriate only behind a hosting ingress that blocks direct access and strips/replaces incoming forwarded headers. Otherwise set the exact trusted proxy IP. The app trusts only forwarded protocol, not client-supplied hostnames. Require HTTPS and keep allowed hosts explicit. Configure SMTP domain verification (SPF/DKIM) with your mail provider; test actual email delivery, because configured settings alone do not prove recovery works.
+`TRUSTED_PROXY_IP=*` is appropriate only behind a hosting ingress that blocks
+direct access and strips/replaces incoming forwarded headers. Otherwise set the
+exact trusted proxy IP. The app trusts **the protocol the ingress saw and
+nothing else**: even with a wildcard proxy, `TRUSTED_PROXY_HEADERS` excludes
+`x-forwarded-for`, because Render appends to that header rather than replacing
+it, so its first value is whatever the client sent. Trusting it would let any
+request choose the address the audit trail records. `deployment_check` refuses
+that combination, so a misconfiguration cannot ship: if you set both a wildcard
+`TRUSTED_PROXY_IP` and `x-forwarded-for` in `TRUSTED_PROXY_HEADERS`, the
+pre-deploy gate fails. Never add it, and do not pass `--all-users` to
+`deployment_check` in `preDeployCommand` unless you accept re-introducing the
+cost this PR removed. Require HTTPS and keep allowed hosts explicit. Configure
+SMTP domain verification (SPF/DKIM) with your mail provider; test actual email
+delivery, because configured settings alone do not prove recovery works.
 
 ## Build and first deployment
 

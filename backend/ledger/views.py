@@ -32,6 +32,7 @@ from .services import RATE, next_month, parse_month, parse_amount, parse_report_
 
 from . import audit_taxonomy
 from .branding import branding_json, color, read_logo_token
+from .observability import proxy_trusted
 
 logger = logging.getLogger(__name__)
 
@@ -625,6 +626,10 @@ def audit_event(request, pk):
         'http_method':event.http_method,
         'path':event.path,
         'ip_address':event.ip_address,
+        # When a proxy is trusted, the recorded address is the peer's socket
+        # address, which on Render is the proxy's, not the member's. The page
+        # says so rather than presenting it as the member's IP.
+        'ip_is_peer':proxy_trusted(),
         'user_agent':event.user_agent,
     })
     # The events that happened during the same request, which is the only

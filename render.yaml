@@ -22,6 +22,12 @@ services:
         value: "1"
       - key: TRUSTED_PROXY_IP
         value: "*"
+      # Render publishes no proxy CIDR, so waitress sees only "*" and the only
+      # proxy header it may honour is which protocol the ingress saw. Trusting
+      # x-forwarded-for from a wildcard peer is refused by deployment_check:
+      # Render appends to it, so the first value is whatever the client sent.
+      - key: TRUSTED_PROXY_HEADERS
+        value: x-forwarded-proto
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: ALLOWED_HOSTS

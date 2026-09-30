@@ -40,6 +40,7 @@ class Command(BaseCommand):
         try:
             self._phase(timings, 'django check --deploy', call_command, 'check', deploy=True, fail_level='WARNING')
             self._phase(timings, 'check_finances', call_command, 'check_finances')
+            self._phase(timings, 'proxy configuration', self._check_proxy)
             self._phase(timings, 'smtp configuration', self._check_smtp)
             self._phase(timings, 'demo password', self._check_demo_password, options['all_users'])
             self._phase(timings, 'active secretaries', self._check_active_secretaries)
@@ -65,6 +66,26 @@ class Command(BaseCommand):
     def _check_smtp(self):
         if not settings.EMAIL_HOST or 'localhost' in settings.DEFAULT_FROM_EMAIL:
             raise CommandError('Configure a real SMTP server and DEFAULT_FROM_EMAIL for recovery emails.')
+
+    def _check_proxy(self):
+        """Refuse the one proxy configuration that makes client IPs forgeable.
+
+        Render appends to X-Forwarded-For rather than replacing it, so the first
+        value in that header is whatever the client sent. Honouring it while
+        TRUSTED_PROXY_IP is a wildcard -- waitress's only option for Render,
+        which publishes no proxy CIDR -- would let any request claim any
+        address, and that address is what the audit trail would record. The safe
+        default, x-forwarded-proto only, is also the enforcing one: this phase
+        exists so the unsafe combination fails the deploy rather than shipping.
+        """
+        if not settings.TRUST_PROXY:
+            return
+        if settings.TRUSTED_PROXY_IP == '*' and 'x-forwarded-for' in settings.TRUSTED_PROXY_HEADERS:
+            raise CommandError(
+                'TRUSTED_PROXY_IP is "*" and x-forwarded-for is trusted. On Render, '
+                'which appends to X-Forwarded-For rather than replacing it, that lets '
+                'any client choose the address the audit trail records. Trust only '
+                'x-forwarded-proto, or pin TRUSTED_PROXY_IP to a known proxy.')
 
     def _report_size(self):
         """Print the row counts these checks are reasoning about.
