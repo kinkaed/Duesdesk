@@ -12,8 +12,8 @@ no template, CSS or JavaScript was changed: the flow is started by opening one U
 | `google_auth.0001_initial` migration | Applied to Neon on 2026-09-30 |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Configured in Render and ignored local backend/.env |
 | Google OAuth client in Google Cloud | Created in project model-gearing-510212-u9; Testing audience |
-| End-to-end test against real Google | **Not done** |
-| Deployed to Render | **Not done** |
+| Google redirect | Verified live; Google account chooser opens. Final user consent/callback still needs a real sign-in. |
+| Deployed to Render | 95b49b9 live on 2026-09-30 |
 
 Until the two environment variables are set, both Google URLs return the ordinary login
 page with an error and nothing else changes. The password login, the secretary signup and
@@ -213,3 +213,11 @@ The Google round trip itself is mocked in the tests (`get_access_token_data` and
 `_decode_id_token`). State, PKCE, replay, session rotation and CSRF are covered, but no
 test has spoken to Google. A successful real sign-in and a real `redirect_uri_mismatch`
 have both never been observed.
+
+## Configured testing account
+
+The external OAuth application remains in Testing mode. The account owner
+(kingsleyampoti4@gmail.com) is registered as a test user and has an active
+Duesdesk membership. Start at https://duesdesk.onrender.com/accounts/google/login/.
+The deployment health and password login page both return HTTP 200.
+No Duesdesk UI files were changed.
