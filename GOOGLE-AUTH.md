@@ -16,7 +16,7 @@ the address itself. Whichever proves it, the account and the organization are cr
 
 | Item | State |
 | --- | --- |
-| Code and tests | Written and passing locally (153 tests, 2 skipped) |
+| Code and tests | Written and passing locally |
 | `google_auth.0001_initial` migration | Applied to Neon on 2026-09-30 |
 | `google_auth.0002_googleauthrejection_flow` migration | **Written, not yet applied to Neon** |
 | `google_auth.0003_pending_signup` migration | **Written, not yet applied to Neon** |
@@ -183,22 +183,34 @@ A test records this behaviour deliberately.
 
 Two tables, chosen so that neither is made to lie about who owns an event.
 
-**`ledger.AuditEvent` — structurally unchanged.** Used for every event about a person who
-is a member of an organization: `signup_email_verified`, `google_login_success` and
-`google_account_linked`. Same `organization`, same `actor`, same `details` JSON shape as
-every other ledger event. The Google events add a `method` key (`google` or `code`) and
-the ordinary ledger events are written as before.
+Nothing writes to `ledger.AuditEvent` directly. Every Google event goes through
+`ledger.services.audit`, the same helper the rest of the application uses, so a Google
+row carries the same correlation the technical log does: request id, method, path,
+client address and user agent, plus redaction and a size cap on `details`.
 
-**`google_auth.GoogleAuthRejection` — new.** Used for an attempt that belongs to no
-organization: an unknown address, an unverified claim, an address matching no user or two
-users, an account with no membership, an OAuth error or cancellation, a provider with no
-credentials configured, a refused verification, and a callback with no flow in the
-session. Fields: `provider`, `action`, `reason`, `flow`, `method`, `email`, `user`
-(nullable), `ip`, `created_at`.
+**`ledger.AuditEvent` — the tenant-visible history.** Used for every event about an
+account that resolves to a membership: `signup.email_verified`, `google.login_success`,
+`google.account_linked`, and any refusal that names a real account. Same `organization`,
+same `actor`, same `details` JSON shape as every other ledger event. The Google events add
+a `method` key (`google` or `code`); a refusal is written with outcome `rejected` and the
+short reason. A refused sign-in for a known account is exactly the security event that
+account's organization can and should see.
+
+**`google_auth.GoogleAuthRejection` — the tenantless record.** Used for every attempt
+that could not be attributed to an account: an unknown address, an unverified claim, an
+address matching no user or two users, an account with no membership, an OAuth error or
+cancellation, a provider with no credentials configured, a refused verification, and a
+callback with no flow in the session. Fields: `provider`, `action`, `reason`, `flow`,
+`method`, `email`, `user` (nullable), `ip`, `created_at`.
+
+A refusal that does resolve to a real account is written **to both tables**: the
+tenantless row here, and a tenant-visible `AuditEvent` under that account's organization.
+A refusal that resolves to no account exists only here, because there is no organization
+to file it under and inventing one would be a lie.
 
 This table deliberately has **no organization column and no organization foreign key**,
-and no application view reads it. Nothing is filed under an organization that did not ask
-for it. `user` is `SET_NULL`, so deleting an account does not erase the record.
+and no application view reads it. `user` is `SET_NULL`, so deleting an account does not
+erase the record. Nothing is filed under an organization that did not ask for it.
 
 `flow` says which entry point the attempt came from, so a refusal to verify a signup
 address is never confused with a refusal to sign in. `method` says how the address was

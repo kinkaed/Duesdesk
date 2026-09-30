@@ -48,3 +48,12 @@ services:
         sync: false
       - key: DEFAULT_FROM_EMAIL
         sync: false
+      # Google sign-in is optional and fails closed: with either value unset the
+      # Google URLs refuse and the emailed code still works. Declared here so a
+      # Blueprint deploy prompts for both secrets instead of silently omitting
+      # them, which would leave Google-looking buttons that never work. See
+      # GOOGLE-AUTH.md for the redirect URIs and the Cloud console setup.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
