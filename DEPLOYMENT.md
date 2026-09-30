@@ -2,6 +2,8 @@
 
 This source is prepared for online deployment on **Render** with **Neon PostgreSQL**. The connection string is a secret (`DATABASE_URL`). No cloud resources are purchased or deployed from this local build.
 
+**RENDER-DEPLOY.md** is the step-by-step companion: the blueprint settings, the environment variable reference, how to push an update to the running service, and a troubleshooting table. Read it alongside this file.
+
 ## Recommended setup: Render web service + Neon PostgreSQL
 
 The two services are separate accounts. Keep both in the **Frankfurt** region. The Dockerfile builds the React frontend and the Django/Waitress backend with no Microsoft ODBC components; the app connects only to PostgreSQL.
@@ -35,7 +37,19 @@ PORT=8000
 TRUST_PROXY=1
 TRUSTED_PROXY_IP=*
 TRUSTED_PROXY_HEADERS=x-forwarded-proto
+GOOGLE_CLIENT_ID=<Google OAuth client id>
+GOOGLE_CLIENT_SECRET=<Google OAuth client secret>
 ```
+
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` enable the optional Google sign-in and
+signup-verification flows. They are the only two values here that may be left unset: with
+either missing, the Google URLs refuse with an explanatory message and the emailed code
+still works, so nothing else breaks. When you do set them, add the production callback
+`https://<your-host>/accounts/google/login/callback/` to the OAuth client's authorized
+redirect URIs first — Google compares the string verbatim — and keep both values out of
+the repository. `render.yaml` declares them with `sync: false`, so applying the Blueprint
+prompts for them as secrets rather than omitting them. The full console steps, the exact
+redirect URIs, and the fail-closed behavior are in **GOOGLE-AUTH.md**.
 
 `TRUSTED_PROXY_IP=*` is appropriate only behind a hosting ingress that blocks
 direct access and strips/replaces incoming forwarded headers. Otherwise set the

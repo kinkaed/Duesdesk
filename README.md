@@ -46,7 +46,7 @@ Optional Vite development server: start the Django server first, then run `pnpm 
 - Audit history, CSRF protection, security headers, secure production cookies and encrypted SQL connections.
 - The address in an audit record is the peer the server actually reached. The app never trusts `X-Forwarded-For` from an unverified proxy (Render appends to it, so a client could set its first value); behind a proxy it records the proxy's address and the page says so. `deployment_check` fails the deploy on any configuration that would make the address client-forgeable.
 
-Read **USER-GUIDE.md** for workflows and **DEPLOYMENT.md** for online hosting, backups and go-live requirements.
+Read **USER-GUIDE.md** for workflows and **DEPLOYMENT.md** for online hosting, backups and go-live requirements. For the step-by-step Render deployment and the procedure for updating the running service, read **RENDER-DEPLOY.md**.
 
 ## Checks
 
