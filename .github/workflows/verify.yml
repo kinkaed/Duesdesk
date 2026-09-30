@@ -25,7 +25,7 @@ jobs:
       - run: python backend/manage.py verify_static
         env:
           TEST_SQLITE: '1'
-      - run: python backend/manage.py test ledger
+      - run: python backend/manage.py test ledger google_auth
         env:
           TEST_SQLITE: '1'
       - run: python backend/manage.py makemigrations --check --dry-run
@@ -59,5 +59,5 @@ jobs:
       - run: pip install -r backend/requirements.lock
       - run: pip check
       - run: python backend/manage.py migrate --noinput
-      - run: python backend/manage.py test ledger
+      - run: python backend/manage.py test ledger google_auth
       - run: python backend/manage.py makemigrations --check --dry-run
