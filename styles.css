@@ -18,3 +18,46 @@
 .sidebar .brand,.sidebar .brand>span:last-child,.sidebar .workspace-label,.sidebar .user-block small{color:var(--org-primary-text)}
 .nav:not(.active){color:var(--org-primary-text)}.nav:not(.active):hover{background:var(--org-accent);color:var(--org-accent-text)}
 .workspace-tag,.avatar{background:var(--org-secondary);color:var(--org-secondary-text)}
+
+/* Responsive phone layouts; wide data scrolls inside its own panel. */
+@media screen and (max-width:760px){
+ html,body{width:100%;min-width:0}
+ .main,main,.content,.panel,.manage-grid,.overview-grid,.metrics,.table-wrap,.report-card,.manage-card{min-width:0;max-width:100%}
+ .sidebar{position:static;width:100%;max-width:100%;padding:16px}.main,main{margin-left:0}
+ .sidebar nav{display:flex;flex-wrap:wrap;overflow:visible;gap:6px}
+ .sidebar .nav{flex:1 1 auto;min-height:44px;justify-content:center;white-space:normal;padding:10px;font-size:13px}
+ .brand{overflow-wrap:anywhere;min-width:0}
+ .topbar{height:auto;min-height:60px;flex-wrap:wrap;padding:12px 16px;gap:10px}
+ .topbar>div:first-child{min-width:0;flex-wrap:wrap;overflow-wrap:anywhere}
+ .topbar-right{width:100%;flex-wrap:wrap;justify-content:space-between;gap:10px}
+ .topbar .account-link{max-width:none;font-size:12px;min-height:44px;display:inline-flex;align-items:center}
+ .topbar .signout{min-width:44px;min-height:44px;justify-content:center}
+ .workspace-tag{max-width:100%;overflow-wrap:anywhere}
+ .content{padding:20px 14px}
+ .page-heading,.panel-heading{gap:12px;flex-wrap:wrap}
+ .page-heading h1{font-size:26px;overflow-wrap:anywhere}
+ .panel-heading>div{min-width:0}.panel-heading .text-button{white-space:normal}
+ .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .metric{min-width:0;padding:16px 12px}
+ .metric>strong,.metric strong{font-size:clamp(20px,5.5vw,28px);overflow-wrap:anywhere}
+ .period-bar{flex-wrap:wrap;gap:12px}.period-bar label{flex-wrap:wrap;gap:8px;max-width:100%}.period-bar input{max-width:100%}
+ .form-row,.manage-grid{grid-template-columns:minmax(0,1fr)}
+ input,select,textarea{min-width:0;max-width:100%;font-size:16px;min-height:44px}
+ input[type=file]{padding:8px;font-size:14px}
+ .button{min-height:44px;white-space:normal;text-align:center}
+ .icon-button,.close{min-width:44px;min-height:44px;flex-shrink:0}
+ .dialog-actions{flex-wrap:wrap;gap:10px}.dialog-actions .button{flex:1 1 130px;min-height:44px;font-size:14px}
+ dialog{width:calc(100% - 24px);max-width:calc(100% - 24px);max-height:calc(100dvh - 24px);padding:18px;margin:auto;overflow-y:auto;overscroll-behavior:contain}
+ .dialog-top,.dialog-heading{gap:10px;align-items:flex-start}.dialog-top h2,.dialog-heading h2{overflow-wrap:anywhere;min-width:0}
+ .table-wrap{width:100%;overflow-x:auto;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch}
+ .table-wrap table{width:100%}.table-wrap:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
+ .status-legend,.profile-meta,.row-actions,.brand-sample{flex-wrap:wrap}
+ .profile-metrics{grid-template-columns:minmax(0,1fr)}.profile-meta>*{min-width:0;overflow-wrap:anywhere}
+ .report-card,.manage-card{padding:18px}.palette-fields{gap:8px;min-width:0}.palette-fields label{min-width:0}
+ .audit-entry pre{max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere}
+ .pager{gap:10px;flex-wrap:wrap;padding:16px 10px}
+ .error,.toast,#toast,.empty,.info-note{overflow-wrap:anywhere;max-width:100%}
+ .toast,#toast{left:12px;right:12px;bottom:16px;width:auto;transform:none}
+ footer{overflow-wrap:anywhere}
+}
+@media screen and (max-width:380px){.metrics{grid-template-columns:minmax(0,1fr)}.metric{min-height:0}.metric>strong{font-size:28px}}
