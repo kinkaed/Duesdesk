@@ -14,6 +14,7 @@ import logging
 import secrets
 from datetime import timedelta
 
+from django.conf import settings
 from django.contrib.auth import get_user_model, login
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
@@ -39,8 +40,6 @@ logger = logging.getLogger('ledger.google_auth')
 BACKEND = 'django.contrib.auth.backends.ModelBackend'
 ALREADY_EXISTS = 'An account with this email already exists, please log in.'
 GOOGLE_MISMATCH = 'The Google account email does not match the email you signed up with.'
-# The session key holding a Google uid that has just proven a pending address.
-GOOGLE_UID = 'pending_google_uid'
 
 VERIFY_URL = '/signup/verify/'
 
@@ -54,9 +53,9 @@ MESSAGES = {
     'no_code': 'Enter the 6-digit code we emailed you.',
     'cooldown': 'Please wait a moment before asking for another code.',
     'hourly_cap': 'Too many codes requested. Please try again later.',
-    'send_failed': 'We could not send that email. Please try again in a moment.',
     'no_pending': 'This sign-up has expired. Please sign up again.',
     'code_sent': 'We emailed you a 6-digit code.',
+    'delivery_failed': 'We could not send your code. Please try again or continue with Google.',
     'invite_invalid': 'This invitation is no longer valid.',
     'invite_email': 'Use the email address named in your invitation.',
     'org_name': 'Enter an organization name.',
@@ -171,8 +170,12 @@ def current(request):
 
 # ---------------------------------------------------------------- the code
 
+@transaction.atomic
 def send_code(request, pending):
     """Email a fresh 6-digit code, subject to the cooldown and the hourly cap."""
+    pending = PendingSignup.objects.select_for_update().filter(pk=pending.pk, token=pending.token).first()
+    if pending is None or pending.expired():
+        return MESSAGES['no_pending']
     now = timezone.now()
     stamps = sorted(t for t in map(parse_datetime, pending.code_sends or []) if t)
     if stamps and (now - stamps[-1]).total_seconds() < COOLDOWN:
@@ -188,54 +191,50 @@ def send_code(request, pending):
     # Keep only the send times still relevant to the sliding-hour cap.
     pending.code_sends = [t.isoformat() for t in stamps if now - t < timedelta(hours=1)] \
         + [now.isoformat()]
-    pending.save(update_fields=['code_hash', 'code_expires_at', 'code_attempts',
-                                'code_dead', 'code_sends'])
+    pending.verified_at = None
     try:
-        sent = send_mail(
+        # Console/file backends would disclose the code in logs or plaintext files.
+        if settings.EMAIL_BACKEND in (
+            'django.core.mail.backends.console.EmailBackend',
+            'django.core.mail.backends.filebased.EmailBackend',
+            'django.core.mail.backends.dummy.EmailBackend',
+        ):
+            raise RuntimeError('No deliverable email backend configured')
+        delivered = send_mail(
             subject='Your Duesdesk verification code',
             message=f'Your Duesdesk verification code is {digits}.\n\n'
-                    'It expires in 10 minutes. If you did not request it, ignore this email.',
+                'It expires in 10 minutes. If you did not request it, ignore this email.',
             from_email=None,
             recipient_list=[pending.email],
-            # Not silent any more. fail_silently=True swallowed a provider
-            # outage and returned 0 as if it had worked, so the page told the
-            # user "we emailed you a code" and then asked them to enter a code
-            # that was never sent. The cooldown and the hourly cap had also
-            # already been spent on it, so retrying straight away was refused
-            # too. The delivery is now checked and the code state is put back
-            # when nothing went out.
             fail_silently=False,
         )
-        delivered = sent > 0
+        if delivered != 1:
+            raise RuntimeError('Email was not accepted')
     except Exception:
-        logger.exception('Verification email delivery failed')
-        delivered = False
-    if not delivered:
-        # Put the row back the way it was before this attempt: no code, and no
-        # send stamped, so a working provider on the next try is not locked out
-        # by the cooldown for a mail that never left.
-        pending.code_hash = ''
-        pending.code_expires_at = None
-        pending.code_attempts = 0
-        pending.code_dead = False
-        pending.code_sends = [t.isoformat() for t in stamps if now - t < timedelta(hours=1)]
-        pending.save(update_fields=['code_hash', 'code_expires_at', 'code_attempts',
-                                    'code_dead', 'code_sends'])
-        return MESSAGES['send_failed']
+        # Do not log exceptions from a mail transport: they may include the body/code.
+        record(request, 'signup.code_rejected', reason='delivery failed',
+               email=pending.email, flow=flows.SIGNUP, method='code')
+        return MESSAGES['delivery_failed']
+    pending.save(update_fields=['code_hash', 'code_expires_at', 'code_attempts',
+                                'code_dead', 'code_sends', 'verified_at'])
     return ''
 
 
 def make_code_hash(pending, digits):
     """PBKDF2 over the code, salted with the pending signup's own token.
 
-    Binding the hash to the row means a stolen database is not enough to try a
-    guessed code against another row, and the digits are never stored.
+    Each code is salted and bound to its pending row. The work factor slows
+    offline guesses; online guesses are limited separately. Digits are not stored.
     """
     return make_password(f'{pending.token}${digits}')
 
 
+@transaction.atomic
 def check_code(request, pending, digits):
     """Try a code. Returns '' when it is right, else the message to show."""
+    pending = PendingSignup.objects.select_for_update().filter(pk=pending.pk, token=pending.token).first()
+    if pending is None or pending.expired():
+        return MESSAGES['no_pending']
     digits = (digits or '').strip()
     if not digits:
         return MESSAGES['no_code']
@@ -246,12 +245,13 @@ def check_code(request, pending, digits):
     if not pending.code_expires_at or pending.code_expires_at <= timezone.now():
         return MESSAGES['expired_code']
 
-    if check_password(f'{pending.token}${digits}', pending.code_hash):
+    if len(digits) == 6 and digits.isascii() and digits.isdigit() and check_password(f'{pending.token}${digits}', pending.code_hash):
         # Single use: spent whether or not the account creation that follows
         # happens to succeed.
         pending.code_hash = ''
         pending.code_dead = True
-        pending.save(update_fields=['code_hash', 'code_dead'])
+        pending.verified_at = timezone.now()
+        pending.save(update_fields=['code_hash', 'code_dead', 'verified_at'])
         return ''
 
     # Counted after the check, so a correct guess is never penalised, and the
@@ -274,7 +274,7 @@ class Invalid(Exception):
     """The signup cannot be completed; the message is shown to the secretary."""
 
 
-def complete(request, pending, method):
+def complete(request, pending, method, google_account=None):
     """Create the account, the organization and the membership, all or nothing.
 
     The only place signup creates anything. Every write is inside one
@@ -284,9 +284,25 @@ def complete(request, pending, method):
     with transaction.atomic():
         # Serialize on the pending row so two concurrent verifications of the
         # same signup cannot both create a user.
-        locked = PendingSignup.objects.select_for_update().filter(pk=pending.pk).first()
+        locked = PendingSignup.objects.select_for_update().filter(pk=pending.pk, token=pending.token).first()
         if locked is None:
             raise AlreadyVerified()
+
+        if locked.expired() or request.session.get(flows.PENDING_TOKEN) != locked.token:
+            raise Invalid(MESSAGES['no_pending'])
+        if get_user_model().objects.filter(email__iexact=locked.email).exists():
+            raise Invalid(ALREADY_EXISTS)
+        if method == GOOGLE:
+            data = google_account.extra_data if google_account else {}
+            if (not google_account or google_account.provider != GOOGLE or not google_account.uid
+                    or data.get('email_verified', data.get('verified_email')) is not True
+                    or not flows.same(data.get('email'), locked.email)):
+                raise Invalid(GOOGLE_MISMATCH)
+            if SocialAccount.objects.filter(provider=GOOGLE, uid=google_account.uid).exists():
+                raise Invalid('This Google account is already linked.')
+            locked.verified_at = timezone.now()
+        elif method != 'code' or not locked.verified_at or not locked.code_expires_at or locked.code_expires_at <= timezone.now():
+            raise Invalid(MESSAGES['expired_code'])
 
         invite = None
         if locked.invite_token_hash:
@@ -340,7 +356,14 @@ def complete(request, pending, method):
             defaults={'user': user, 'email': locked.email, 'verified': True,
                       'primary': True})
         if method == GOOGLE:
-            _link_google(request, user, locked.email)
+            SocialAccount.objects.create(provider=GOOGLE, uid=google_account.uid, user=user,
+                extra_data={'email': locked.email, 'email_verified': True})
+            # The dotted identifier, not google_account_linked: linking a Google
+            # account during signup verification is the same event as linking one
+            # during a sign-in, so it takes the name already in the taxonomy. Two
+            # names for one event would split the history and leave this one
+            # unlabelled, filed under "other".
+            record_user(request, 'google.account_linked', user, method=GOOGLE, email=locked.email)
 
         PendingSignup.objects.filter(pk=locked.pk).delete()
 
@@ -352,22 +375,9 @@ def complete(request, pending, method):
     login(request, user, backend=BACKEND)
     request.session[flows.LOGGED_IN_EMAIL] = locked.email
     request.session.pop(flows.PENDING_TOKEN, None)
+    request.session.pop(flows.RETURN, None)
     flows.finish(request, flows.SIGNUP)
     return user
-
-
-def _link_google(request, user, email):
-    """Attach the Google identity that just proved this address.
-
-    The uid was checked against the stored identity by the adapter before this
-    runs, so this cannot overwrite a link belonging to somebody else.
-    """
-    uid = request.session.pop(GOOGLE_UID, None)
-    if not uid:
-        return
-    SocialAccount.objects.update_or_create(
-        provider='google', uid=uid, user=user,
-        defaults={'extra_data': {'email': email, 'email_verified': True}})
 
 
 def refuse(request, key, pending=None, action='signup.verification_rejected', reason=None, email='',

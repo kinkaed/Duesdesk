@@ -9,6 +9,9 @@ import logging
 
 from django.contrib.auth import views as auth
 from django.shortcuts import redirect, render
+from django.db import IntegrityError
+from django.core.exceptions import ValidationError
+from django.views.decorators.http import require_POST, require_http_methods
 from django.views.decorators.csrf import ensure_csrf_cookie
 
 from . import flows, signup
@@ -70,14 +73,13 @@ def google_login_callback(request):
         # Without an entry point, nothing about this response may be trusted.
         record(request, 'google.callback_without_flow', reason='no flow in session')
         return redirect(LOGIN_URL)
-    from allauth.socialaccount.providers.oauth2.views import OAuth2CallbackView
 
     from .provider import GoogleOAuth2Adapter
     # This is allauth's own callback view, driven by our provider adapter, which
     # checks the claims before allauth writes anything. The socialaccount adapter
     # it uses reads the flow recorded above.
     try:
-        return OAuth2CallbackView.adapter_view(GoogleOAuth2Adapter)(request)
+        return BoundGoogleCallbackView.adapter_view(GoogleOAuth2Adapter)(request)
     except Exception:
         # A provider reply we cannot even read is still just a refused round
         # trip. The traceback is logged so the cause is not lost, and the
@@ -98,16 +100,19 @@ def _to_google(request):
     credentials refuses here with a recorded reason instead of sending the
     browser to Google with an empty client id.
     """
-    from allauth.socialaccount.providers.base.utils import respond_to_login_on_get
     from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 
     provider = GoogleOAuth2Adapter(request).get_provider()
     if not provider.app.client_id or not provider.app.secret:
         return None
-    return respond_to_login_on_get(request, provider) \
-        or provider.redirect_from_request(request)
+    return provider.redirect(request, process='login', data={
+        'flow': flows.flow_of(request),
+        'nonce': request.session.get(flows.NONCE),
+        'pending': request.session.get(flows.PENDING_TOKEN),
+    })
 
 
+@require_http_methods(['GET', 'POST'])
 def verify(request):
     """The verification page: prove the address, or start again.
 
@@ -138,6 +143,7 @@ def verify(request):
         'return_values': _back_values(request, pending),
         'code_live': pending.code_live(),
         'can_resend': pending.can_send_code(),
+        'resend_wait': pending.resend_wait(),
         'error': request.session.pop(flows.SIGNUP_ERROR, None),
         'code_error': request.session.pop(flows.CODE_ERROR, None),
         'sent': request.session.pop('verify_code_sent', False),
@@ -174,6 +180,9 @@ def _act(request, pending):
     if action == 'resend':
         problem = signup.send_code(request, pending)
         if problem:
+            record(request, 'signup.code_rejected', reason=next(
+                (key for key, value in signup.MESSAGES.items() if value == problem),
+                'send rejected'), email=pending.email, flow=flows.SIGNUP, method=CODE)
             request.session[flows.SIGNUP_ERROR] = problem
         else:
             request.session['verify_code_sent'] = True
@@ -181,14 +190,19 @@ def _act(request, pending):
     if action == 'code':
         problem = signup.check_code(request, pending, request.POST.get('code'))
         if problem:
-            signup.refuse(request, 'code', pending, reason='code rejected', method=CODE)
+            signup.refuse(request, 'code', pending, reason=next(
+                (key for key, value in signup.MESSAGES.items() if value == problem),
+                'code rejected'), method=CODE)
+            request.session.pop(flows.SIGNUP_ERROR, None)
             request.session[flows.CODE_ERROR] = problem
             return problem, None
         try:
             signup.complete(request, pending, CODE)
-        except (signup.Invalid, signup.AlreadyVerified) as error:
-            problem = str(error) or signup.MESSAGES['no_pending']
-            signup.refuse(request, 'completion', pending, reason=problem[:60], method=CODE)
+        except (signup.Invalid, signup.AlreadyVerified, IntegrityError, ValidationError) as error:
+            problem = str(error) if isinstance(error, signup.Invalid) else (
+                'We could not finish your sign-up. Please request a new code and try again.')
+            signup.refuse(request, 'completion', pending, reason='completion failed', method=CODE)
+            request.session[flows.SIGNUP_ERROR] = problem
             return problem, None
         return '', '/'
     if action == 'back':
@@ -206,6 +220,7 @@ def _act(request, pending):
     return '', None
 
 
+@require_POST
 def google_verify(request):
     """Start the Google round trip for the pending signup held in this session.
 
@@ -262,3 +277,28 @@ def verify_error(request, reason, email=''):
         message = signup.MESSAGES['no_pending']
     request.session[flows.SIGNUP_ERROR] = message
     return redirect(VERIFY_URL)
+
+
+from allauth.socialaccount.providers.oauth2.views import OAuth2CallbackView
+
+
+class BoundGoogleCallbackView(OAuth2CallbackView):
+    """Check the server-stored OAuth state before exchanging any credentials."""
+
+    def _get_state(self, request, provider):
+        state, response = super()._get_state(request, provider)
+        if response:
+            return state, response
+        data = state.get('data') or {}
+        expected = {'flow': flows.flow_of(request),
+                    'nonce': request.session.get(flows.NONCE),
+                    'pending': request.session.get(flows.PENDING_TOKEN)}
+        if not expected['nonce'] or data != expected:
+            record(request, 'google.callback_rejected', reason='stale or crossed flow',
+                   flow=data.get('flow', ''), method='google')
+            if flows.flow_of(request) == flows.SIGNUP:
+                request.session[flows.SIGNUP_ERROR] = 'That Google request has expired. Please try again.'
+                return None, redirect(VERIFY_URL)
+            request.session['google_login_error'] = 'That Google request has expired. Please try again.'
+            return None, redirect(LOGIN_URL)
+        return state, None

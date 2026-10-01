@@ -42,7 +42,7 @@ def details_for(request, method='', flow='', email='', **extra):
     row, filled from the request context, and repeating them inside the details
     JSON would give two places to disagree.
     """
-    details = {'provider': 'google'}
+    details = {'provider': 'email' if method == 'code' else 'google'}
     if method:
         details['method'] = method
     if flow:
@@ -93,6 +93,7 @@ def record(request, action, user=None, reason='', email='', flow='', method=''):
     """
     try:
         GoogleAuthRejection.objects.create(
+            provider='email' if method == 'code' else 'google',
             action=action, reason=(reason or '')[:60], flow=flow, method=method,
             email=(email or '')[:254], user=user, ip=client_ip(request) or '')
     except Exception:

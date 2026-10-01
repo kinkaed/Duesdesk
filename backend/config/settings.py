@@ -226,7 +226,10 @@ X_FRAME_OPTIONS = 'DENY'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2097152
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2097152
 PASSWORD_RESET_TIMEOUT = 3600
-EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend' if PRODUCTION else 'django.core.mail.backends.console.EmailBackend'
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '').strip()
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND') or (
+    'google_auth.email_backend.ResendEmailBackend' if RESEND_API_KEY
+    else 'django.core.mail.backends.smtp.EmailBackend')
 EMAIL_HOST = os.environ.get('EMAIL_HOST', '')
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '587'))
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '')
@@ -265,7 +268,7 @@ LOGGING = {
     },
 }
 
-# Google OAuth is backend-only. Only the two explicit Google URLs are mounted.
+# Google uses explicit login/verification entry points and one shared callback.
 SITE_ID = 1
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()

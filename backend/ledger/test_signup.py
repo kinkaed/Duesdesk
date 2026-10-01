@@ -183,7 +183,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.client.post('/signup/', self.data())
 
         with override_settings(**GOOGLE_SETTINGS):
-            response = self.client.post('/signup/verify/', {'action': 'code', 'code': '000000'})
+            response = self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'That code is not correct')
@@ -196,8 +196,8 @@ class SignupTests(GoogleTestMixin, TestCase):
 
         with override_settings(**GOOGLE_SETTINGS):
             for _ in range(5):
-                self.client.post('/signup/verify/', {'action': 'code', 'code': '111111'})
-            response = self.client.post('/signup/verify/', {'action': 'code', 'code': '111111'})
+                self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
+            response = self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
 
         self.assertContains(response, 'Too many incorrect attempts', status_code=200)
         pending = self.pending()
@@ -211,7 +211,7 @@ class SignupTests(GoogleTestMixin, TestCase):
 
         with override_settings(**GOOGLE_SETTINGS):
             for _ in range(4):
-                self.client.post('/signup/verify/', {'action': 'code', 'code': '111111'})
+                self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
             response = self.client.post('/signup/verify/', {'action': 'code', 'code': code})
 
         self.assertRedirects(response, '/', fetch_redirect_response=False)
@@ -454,4 +454,4 @@ class ExistingEmailTests(TestCase):
         self.assertContains(response,
                             'An account with this email already exists, please log in.')
         self.assertFalse(PendingSignup.objects.exists())
-        self.assertIsNone(GoogleAuthRejection.objects.first())
+        self.assertEqual(GoogleAuthRejection.objects.get().reason, 'account already exists')

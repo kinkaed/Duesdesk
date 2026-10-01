@@ -89,12 +89,20 @@ def signup(request):
     org_name=request.POST.get('organization_name','').strip() or (kept or {}).get('organization_name','')
     logo_token=(request.POST.get('logo_token')
                or request.session.get(google_flows.LOGO,'') or (kept or {}).get('logo_token',''))
-    if request.method=='POST' and form.is_valid():
+    form_valid = form.is_valid() if request.method == 'POST' else False
+    if request.method == 'POST' and not form_valid and User.objects.filter(
+            email__iexact=request.POST.get('email', '').strip()).exists():
+        from google_auth.audit import record
+        record(request, 'signup.rejected', reason='account already exists',
+               email=request.POST.get('email', '').strip().lower(), flow='signup')
+    if request.method=='POST' and form_valid:
         # Validate exactly as before, then create nothing. The user, the
         # organization and the membership are created only once the address has
         # been proven; see google_auth.signup.complete.
         try:
             if not token and not org_name:raise ValueError('Enter an organization name.')
+            if not token:
+                Organisation._meta.get_field('name').clean(org_name, None)
             if token:
                 # Nothing is created here, so this is only a friendly check to
                 # stop somebody typing a wrong address. The invitation is locked

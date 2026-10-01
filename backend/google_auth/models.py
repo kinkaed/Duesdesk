@@ -70,6 +70,7 @@ class PendingSignup(models.Model):
     # is no longer usable.
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     expires_at = models.DateTimeField()
+    verified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-id']
@@ -86,6 +87,19 @@ class PendingSignup(models.Model):
         return bool(self.code_hash) and not self.code_dead \
             and self.code_expires_at and self.code_expires_at > timezone.now() \
             and self.code_attempts < CODE_ATTEMPTS
+
+    def resend_wait(self):
+        """Seconds until both resend limits allow another email."""
+        import math
+        now = timezone.now()
+        stamps = sorted(t for t in map(parse_datetime, self.code_sends or [])
+                        if t and now - t < timedelta(hours=1))
+        deadlines = [now]
+        if stamps:
+            deadlines.append(stamps[-1] + timedelta(seconds=RESEND_COOLDOWN))
+        if len(stamps) >= SENDS_PER_HOUR:
+            deadlines.append(stamps[-SENDS_PER_HOUR] + timedelta(hours=1))
+        return max(0, math.ceil((max(deadlines) - now).total_seconds()))
 
     def can_send_code(self):
         """True when the cooldown and the hourly cap both allow another send."""

@@ -69,7 +69,12 @@ def main():
             trusted_proxy_headers=set(settings.TRUSTED_PROXY_HEADERS),
             clear_untrusted_proxy_headers=True,
         )
-    serve(application, **options)
+    from google_auth.maintenance import start_cleanup
+    cleanup_stop = start_cleanup()
+    try:
+        serve(application, **options)
+    finally:
+        cleanup_stop.set()
 
 
 if __name__ == '__main__':

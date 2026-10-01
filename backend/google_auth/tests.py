@@ -625,7 +625,7 @@ class SignupDeliveryFailureTests(GoogleTestMixin, TestCase):
             landed = self.client.post(SIGNUP_PAGE, signup_data(self.address))
 
         self.assertEqual(self.error_shown_after(landed),
-                         signup.MESSAGES['send_failed'])
+                         signup.MESSAGES['delivery_failed'])
 
     def test_a_provider_that_returns_zero_is_treated_as_a_failure(self):
         # The other shape of the same fault: no exception, nothing delivered.
@@ -635,7 +635,7 @@ class SignupDeliveryFailureTests(GoogleTestMixin, TestCase):
             landed = self.client.post(SIGNUP_PAGE, signup_data(self.address))
 
         self.assertEqual(self.error_shown_after(landed),
-                         signup.MESSAGES['send_failed'])
+                         signup.MESSAGES['delivery_failed'])
 
     def test_a_failed_send_leaves_no_usable_code_behind(self):
         with self.failing_provider():

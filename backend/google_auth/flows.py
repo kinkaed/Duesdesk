@@ -7,11 +7,13 @@ session and nowhere else. No query parameter, form field or header can select a
 flow, which is what makes it impossible for the login callback to complete a
 signup or for the verification callback to sign anybody in.
 """
+import secrets
 from django.utils import timezone
 
 LOGIN = 'login'
 SIGNUP = 'signup'
 
+NONCE = 'google_flow_nonce'
 FLOW = 'google_flow'                     # which entry point this session started
 LOGIN_FLAG = 'google_login'              # set by the login entry point
 # The address Google has just proven, held for the length of the session and
@@ -52,6 +54,7 @@ def begin_login(request):
     """Enter the sign-in flow, discarding anything left over from a signup."""
     for key in (PENDING_TOKEN, INVITE, LOGO, LOGIN_FLAG, SIGNUP_ERROR, CODE_ERROR):
         request.session.pop(key, None)
+    request.session[NONCE] = secrets.token_urlsafe(32)
     request.session[FLOW] = LOGIN
     request.session[LOGIN_FLAG] = timezone.now().isoformat()
 
@@ -60,6 +63,7 @@ def begin_signup(request, token):
     """Enter the verification flow for one pending signup."""
     for key in (PENDING_TOKEN, LOGIN_FLAG, SIGNUP_ERROR, CODE_ERROR):
         request.session.pop(key, None)
+    request.session[NONCE] = secrets.token_urlsafe(32)
     request.session[FLOW] = SIGNUP
     request.session[PENDING_TOKEN] = token
 
@@ -77,6 +81,7 @@ def finish(request, flow, clear_invite=True):
     """
     if request.session.get(FLOW) == flow:
         request.session.pop(FLOW, None)
+        request.session.pop(NONCE, None)
     if flow == SIGNUP:
         request.session.pop(PENDING_TOKEN, None)
         if clear_invite:
