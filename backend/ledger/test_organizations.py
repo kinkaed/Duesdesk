@@ -74,9 +74,15 @@ class OrganizationTests(GoogleTestMixin, TestCase):
     def test_cross_org_mutations_are_rejected_and_spoofed_org_is_ignored(self):
         self.assertEqual(self.post(f'/api/members/{self.mb.pk}/',{'name':'hacked'}).status_code,404)
         data={**self.payload,'member_id':self.mb.pk,'request_key':str(uuid4()),'organization_id':self.b.pk}
-        self.assertEqual(self.post('/api/payments/',data).status_code,400)
-        self.assertEqual(self.post('/api/payments/preview/',data).status_code,400)
-        self.assertEqual(self.post(f'/api/payments/{self.pb.pk}/void/',{'reason':'Wrong organization'}).status_code,400)
+        # 404, not 400, for a record that belongs to another organization. It used
+        # to be a 400 carrying "Member matching query does not exist." from the
+        # ORM, which both leaked the wording and answered a different status to the
+        # member and account endpoints above for exactly the same attempt. The
+        # answer now has to be identical whether the id is absent or someone
+        # else's, or the status code alone confirms it exists.
+        self.assertEqual(self.post('/api/payments/',data).status_code,404)
+        self.assertEqual(self.post('/api/payments/preview/',data).status_code,404)
+        self.assertEqual(self.post(f'/api/payments/{self.pb.pk}/void/',{'reason':'Wrong organization'}).status_code,404)
         self.assertEqual(self.post(f'/api/accounts/{self.ub.pk}/disable/').status_code,404)
         response=self.post('/api/members/',{'name':'Own new member','joined':'2026-09-01','organization_id':self.b.pk})
         self.assertEqual(response.status_code,201,response.content)

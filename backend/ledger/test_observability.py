@@ -19,7 +19,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.utils import OperationalError
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
@@ -1234,3 +1234,139 @@ class TaxonomyTests(TestCase):
             self.assertNotIn('_', label, f'{reason}: a machine value leaked into a sentence')
             self.assertNotIn(reason, label, f'{reason}: the label is just the value back')
 
+
+
+@override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'])
+class CsrfAuditTests(TestCase):
+    """The CSRF control firing leaves a record, and the taxonomy stops lying.
+
+    A refusal is evidence that something tried to make a state-changing request
+    without a token. Nothing about it was visible before: the taxonomy advertised
+    the event and no code path produced it, so the audit history silently had a
+    hole exactly where an attack would look for one.
+    """
+
+    def setUp(self):
+        self.org = Organisation.objects.create(name='Csrf Org')
+        self.secretary = User.objects.create_user('sec', email='sec@example.com',
+                                                  password='A-Fresh-Strong-Password!')
+        UserAccess.objects.create(organization=self.org, user=self.secretary, role='secretary')
+
+    def csrf_client(self, authenticated=True):
+        client = Client(enforce_csrf_checks=True)
+        if authenticated:
+            client.force_login(self.secretary)
+        return client
+
+    def events(self):
+        return AuditEvent.objects.filter(action='security.csrf.failure')
+
+    def test_a_real_rejection_is_recorded(self):
+        response = self.csrf_client().post('/logout/')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.events().count(), 1)
+        event = self.events().get()
+        self.assertEqual(event.outcome, 'rejected')
+        # Django's own reason, recorded so the reader knows which check failed.
+        self.assertIn('CSRF', event.reason)
+
+    def test_a_rejection_against_a_signed_in_user_names_the_tenant(self):
+        # AuthenticationMiddleware has run by the time Django resolves this hook,
+        # so the refusal can be filed under the account that was targeted. That
+        # is what makes it visible to an auditor reading their own history.
+        self.csrf_client().post('/logout/')
+        event = self.events().get()
+        self.assertEqual(event.organization_id, self.org.pk)
+        self.assertEqual(event.actor_id, self.secretary.pk)
+
+    def test_an_anonymous_rejection_is_recorded_without_inventing_a_tenant(self):
+        self.csrf_client(authenticated=False).post('/login/', {'username': 'x', 'password': 'y'})
+        event = self.events().get()
+        # The row exists, and its organization is empty rather than borrowed.
+        # A fabricated tenant would file somebody's failed request as if it had
+        # happened inside that organization.
+        self.assertIsNone(event.organization_id)
+        self.assertIsNone(event.actor_id)
+
+    def test_the_rejection_still_happens(self):
+        # Recording the refusal must not change the answer. If the middleware
+        # swallowed the rejection the audit row would be reporting a block that
+        # never occurred.
+        self.csrf_client().post('/api/accounts/')
+        self.assertEqual(self.events().count(), 1)
+        self.assertEqual(self.csrf_client().post('/api/accounts/').status_code, 403)
+
+    def test_a_valid_request_records_nothing(self):
+        client = self.csrf_client()
+        client.get('/api/session/')
+        token = client.cookies['csrftoken'].value
+        response = client.post('/api/accounts/', {'username': 'new', 'email': 'n@example.com',
+                                                  'role': 'auditor', 'password': 'Another-Strong-Pass!9'},
+                               content_type='application/json',
+                               HTTP_X_CSRFTOKEN=token)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(self.events().count(), 0)
+
+    def test_the_token_never_reaches_the_record(self):
+        self.csrf_client().post('/logout/')
+        details = json.dumps(self.events().get().details)
+        # The refusal reason is a fixed string; the submitted token must not be
+        # anywhere in a row an auditor can read.
+        self.assertNotIn('csrftoken', details.lower())
+
+    def test_the_event_is_labeled_for_the_ui(self):
+        self.csrf_client().post('/logout/')
+        self.assertIn('security.csrf.failure', ACTIONS)
+        self.assertEqual(describe('security.csrf.failure', 'rejected')['severity'], 'critical')
+
+    def test_the_taxonomy_advertises_no_event_without_a_producer(self):
+        # Every action the allowlist promises must be something the code can
+        # actually write. security.suspicious_request and system.startup used to
+        # sit in both lists with no call site anywhere, which is a promise the
+        # audit history cannot keep; they were removed rather than left in place
+        # to make the catalogue look complete.
+        for phantom in ('security.suspicious_request', 'system.startup'):
+            self.assertNotIn(phantom, ACTIONS, f'{phantom} has no producer but is still labelled')
+            self.assertNotIn(phantom, ANONYMOUS_ACTIONS, f'{phantom} is still promised')
+        # security.csrf.failure is the one that stayed, and this asserts it is
+        # genuinely produced rather than merely declared.
+        self.assertIn('security.csrf.failure', ANONYMOUS_ACTIONS)
+        self.csrf_client().post('/logout/')
+        self.assertEqual(self.events().count(), 1)
+
+    def test_djangos_own_csrf_middleware_is_the_one_in_use(self):
+        # Regression guard. The first attempt at this audit substituted a
+        # subclass of CsrfViewMiddleware, which silently turned Django's W003
+        # deploy check red ("CSRF protection is not enabled") and stopped W016
+        # from checking CSRF_COOKIE_SECURE at all, because both identify the
+        # middleware by exact dotted path. Recording the refusal through
+        # CSRF_FAILURE_VIEW instead keeps both checks working. If a future change
+        # reintroduces the subclass, deployment_check --fail-level WARNING would
+        # block every deploy, and this fails first with a clearer cause.
+        from django.conf import settings
+        self.assertIn('django.middleware.csrf.CsrfViewMiddleware', settings.MIDDLEWARE)
+        self.assertEqual(settings.CSRF_FAILURE_VIEW, 'ledger.middleware.csrf_failure')
+
+    def test_the_deploy_checks_still_believe_csrf_is_configured(self):
+        # The check run, not the assumption: W003 and W016 are both the security
+        # checks a subclass would silently disable.
+        #
+        # W016 asserts CSRF_COOKIE_SECURE, which settings derives from PRODUCTION,
+        # so under the test runner it is legitimately False and W016 correctly
+        # fires. What matters is that it fires for that reason and not because the
+        # middleware went missing - W003 is the one a subclass breaks, and it must
+        # not appear. Booting real production settings in a subprocess is what
+        # test_production_config already does; asserting the string here keeps this
+        # guard focused on the regression it exists to catch.
+        from io import StringIO
+        from django.conf import settings
+        from django.core.management import call_command
+        out = StringIO()
+        try:
+            call_command('check', '--deploy', stdout=out, stderr=out)
+        except SystemExit:
+            pass  # warnings are expected outside production; only the ids matter
+        report = out.getvalue()
+        self.assertNotIn('security.W003', report)
+        # W016 stays wired up: it is present exactly when the cookie is not secure.
+        self.assertEqual('security.W016' in report, not settings.CSRF_COOKIE_SECURE)

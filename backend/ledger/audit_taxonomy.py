@@ -144,9 +144,7 @@ ACTIONS = {
                                            'An email verification was refused'),
     'security.account_locked': Action('An account was locked after repeated failed sign-ins', 'security', 'critical'),
     'security.csrf.failure': Action('A request was blocked for a missing or invalid security token', 'security', 'critical'),
-    'security.suspicious_request': Action('A suspicious request was blocked', 'security', 'critical'),
     'access.denied': Action('Access was denied', 'security', 'critical'),
-    'system.startup': Action('The service started', 'security', 'routine'),
 }
 
 # Every category that an action can claim, for validating the `category` filter.

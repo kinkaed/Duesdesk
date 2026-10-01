@@ -159,6 +159,37 @@ def plan_payment(member, amount, month):
         month = next_month(month)
     raise ValueError('This payment spans too many months. Choose a later starting month.')
 
+def defer_audit(error, action, obj=None, details=None, *, outcome='rejected', reason=''):
+    """Attach an audit event to an exception so it survives the rollback.
+
+    A refusal and its audit event cannot share one transaction. The refusal is
+    raised to undo the work it is refusing, and the undo takes the event with it:
+    the payment replay, the expired import preview and the half-written import
+    batch all produced no row at all, which is exactly when an event matters
+    most. The comment above api()'s write lock used to argue the event was safe
+    because "the transaction has already rolled back by the time this runs". It
+    had not: the caller is still inside that transaction, and the re-raise that
+    produces the error response is what ends it.
+
+    So the event travels out with the exception instead. api() is the only place
+    that knows the transaction is over, and it writes the event there, after the
+    rollback and before the response.
+    """
+    error.deferred_audit = {'action': action, 'obj': obj, 'details': details,
+                            'outcome': outcome, 'reason': reason}
+    return error
+
+
+def write_deferred_audit(user, error):
+    """Record an event deferred by defer_audit(), if the error carries one."""
+    pending = getattr(error, 'deferred_audit', None)
+    if not pending:
+        return False
+    audit(user, pending['action'], pending['obj'], pending['details'],
+          outcome=pending['outcome'], reason=pending['reason'])
+    return True
+
+
 class PaymentRejected(ValueError):
     """A request refused on the grounds that it duplicates an earlier one.
 

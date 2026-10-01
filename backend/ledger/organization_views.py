@@ -146,6 +146,12 @@ def invites(request):
 def revoke_invite(request,pk):
     item=get_object_or_404(SecretaryInvite,pk=pk,organization=organization_for(request.user))
     if item.used_at:raise ValueError('This invitation has already been used.')
+    # Idempotent, like disable_account and enable_account next door. Revoking
+    # twice used to write a second invite.revoked row and stamp a second
+    # revoked_at on the same invite, so a double click on Revoke manufactured
+    # duplicate history: an auditor reading the trail would see the invitation
+    # cancelled by two separate decisions when only one was ever made.
+    if item.revoked_at:return JsonResponse({'ok':True,'already_revoked':True})
     item.revoked_at=timezone.now();item.save(update_fields=['revoked_at'])
     audit(request.user,'invite.revoked',item)
     return JsonResponse({'ok':True})

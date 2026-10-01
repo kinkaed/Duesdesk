@@ -18,7 +18,7 @@ from django.core import signing
 from django.core.exceptions import ValidationError
 from django.db import transaction, IntegrityError, connection
 from django.db.models import Sum, Q, Count
-from django.http import JsonResponse, HttpResponse
+from django.http import JsonResponse, HttpResponse, Http404
 from django.shortcuts import render, get_object_or_404, redirect
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods
@@ -27,8 +27,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from .forms import SignupForm
 from .models import Member, Payment, Allocation, DuesMonth, UserAccess, AuditEvent, Organisation, RecoveryAttempt, ImportBatch, SecretaryInvite
-from .access import role_for, visible_members, visible_payments, organization_for, membership, last_access_organization
-from .services import RATE, next_month, parse_month, parse_amount, parse_report_month, plan_payment, record_payment, record_payment_result, void_payment, audit, PaymentRejected
+from .access import role_for, visible_members, visible_payments, organization_for, membership, last_access_organization, revoke_sessions
+from .services import RATE, next_month, parse_month, parse_amount, parse_report_month, plan_payment, record_payment, record_payment_result, void_payment, audit, defer_audit, write_deferred_audit, PaymentRejected
 
 from . import audit_taxonomy
 from .branding import branding_json, color, read_logo_token
@@ -43,6 +43,13 @@ NO_ACCESS = 'Your account has no active organization access. Contact your organi
 # Shared by api() and the per-view role checks below so every JSON 403 for an
 # insufficient role reads the same, instead of a zero-byte body.
 READ_ONLY = 'Your account is read-only.'
+
+# One wording for every record the caller cannot see. The audit history already
+# used "That audit event does not exist." for the same situation, so this is
+# that phrasing widened to the other record types. Deliberately does not name
+# the type: saying "member" where the id was actually an invite would tell a
+# caller probing another tenant which table the id space belongs to.
+NOT_FOUND = 'That record does not exist.'
 
 # One page of the history. Kept as a named constant because the endpoint also
 # reads one row beyond it to decide has_more, and that arithmetic has to stay in
@@ -62,6 +69,13 @@ AUDIT_SEARCH_MATCH_LIMIT = 200
 # Member.code is a property, not a column, so a typed code is matched by parsing
 # the number back out rather than by querying for it.
 MEMBER_CODE_PATTERN = re.compile(r'^MBR-0*(\d{1,9})$', re.IGNORECASE)
+
+# One page of the payments list, and the deepest page it will actually run. Same
+# reasoning as the audit history below: past the cap the offset is large enough
+# that the database walks past the whole table in order to discard the rows, and
+# no secretary is paging through a thousand screens of payments.
+PAYMENT_PAGE_SIZE = 100
+PAYMENT_MAX_PAGE = 1000
 
 def _db_diagnostics(error):
     """Pull the failing statement, table and constraint out of a database error.
@@ -122,17 +136,40 @@ def api(view):
                         return JsonResponse({'error':'Your organization access has ended.'}, status=403)
                     return view(request, *args, **kwargs)
             return view(request, *args, **kwargs)
-        except (ValueError, TypeError, ValidationError, Member.DoesNotExist, Payment.DoesNotExist) as error:
+        except (Http404, Member.DoesNotExist, Payment.DoesNotExist) as missing:
+            # A member, account, invite or payment that is not in the caller's
+            # organization. Django's own handler answers this with a rendered
+            # HTML page, which is the wrong shape entirely for a JSON endpoint:
+            # api.ts has no status-specific handling for it and shows the
+            # response as an infrastructure failure rather than "not found".
+            # The same 404 wording for every record keeps a missing record and
+            # someone else's record indistinguishable, which is what stops a
+            # secretary walking the id space to enumerate other tenants' data.
+            write_deferred_audit(request.user, missing)
+            return JsonResponse({'error': NOT_FOUND}, status=404)
+        except (ValueError, TypeError, ValidationError) as error:
             message = '; '.join(error.messages) if isinstance(error, ValidationError) else str(error)
+            write_deferred_audit(request.user, error)
             return JsonResponse({'error': message or 'Check the entered values.'}, status=400)
         except IntegrityError as error:
             # Never swallow this silently. The generic 409 on its own left no way
             # to find the cause, so log the traceback plus everything the driver
             # reports about the failing statement.
+            write_deferred_audit(request.user, error)
             details=_db_diagnostics(error)
             logger.exception('IntegrityError in %s db=%s %s', view.__name__, connection.vendor, details or 'no driver detail')
             constraint=details.get('constraint_name')
             return JsonResponse({'error': 'A conflicting record already exists. Refresh and try again.', 'detail': f'{view.__name__} violates {constraint}.' if constraint else f'{view.__name__} raised a database conflict.', 'constraint':constraint,'table':details.get('table_name')}, status=409)
+        except Exception as error:
+            # Anything the handlers above do not recognise still has to leave its
+            # event behind. The refusals api() knows how to word are the ones a
+            # view anticipated; this is the half-written import batch, the payment
+            # that died between saving the row and writing its allocations. Those
+            # are exactly the events that were being lost, because nothing was
+            # there to catch them. The error still propagates: this is a real fault
+            # and the caller keeps getting a 500 rather than a tidy 400.
+            write_deferred_audit(request.user, error)
+            raise
     return wrapped
 
 def secretary_only(request):
@@ -257,7 +294,12 @@ def member_detail(request,pk):
 @read_only_post
 def payment_preview(request):
     data=body(request)
-    member=visible_members(request.user).get(pk=int(data.get('member_id',0)))
+    try:member_id=int(data.get('member_id',0))
+    except (TypeError,ValueError):raise ValueError('Choose a member.')
+    # get_object_or_404 rather than .get(): a member that is not in the caller's
+    # organization is a 404, which is what every other record lookup already
+    # answers, instead of a 400 carrying "Member matching query does not exist."
+    member=get_object_or_404(visible_members(request.user),pk=member_id)
     plan=plan_payment(member,parse_amount(data.get('amount')),parse_month(data.get('start_month')))
     return JsonResponse({'allocations':[{'month':p['month'].strftime('%B %Y'),'amount':str(p['amount']),'status':p['status']} for p in plan]})
 
@@ -265,17 +307,25 @@ def payment_preview(request):
 @require_http_methods(['GET','POST'])
 def payments(request):
     if request.method=='GET':
-        page=max(1,int(request.GET.get('page',1)))
+        # Same bounded read as the audit history. A hand-typed or huge page
+        # value used to reach int() uncaught, so api() answered 400 with the
+        # verbatim Python message "invalid literal for int() with base 10",
+        # and a page large enough to overflow the offset arithmetic became an
+        # IntegrityError and a misleading 409 about a conflicting record.
+        page=_audit_page(request.GET.get('page')) or 1
+        if page > PAYMENT_MAX_PAGE:
+            return JsonResponse({'payments':[],'page':page,'has_more':False})
         items=visible_payments(request.user).select_related('member').prefetch_related('allocations__dues_month').order_by('-payment_date','-id')
-        return JsonResponse({'payments':[payment_json(p) for p in items[(page-1)*100:page*100]],'page':page,'has_more':items.count()>page*100})
+        return JsonResponse({'payments':[payment_json(p) for p in items[(page-1)*PAYMENT_PAGE_SIZE:page*PAYMENT_PAGE_SIZE]],'page':page,'has_more':items.count()>page*PAYMENT_PAGE_SIZE})
     try:
         item,created=record_payment_result(body(request),request.user)
     except PaymentRejected as rejection:
-        # Recorded here, not inside record_payment_result: the payment
-        # transaction has already rolled back by the time this runs, so an event
-        # written there would have been rolled back with it. Re-raising lets api()
-        # turn it into the same 400 the message has always produced.
-        audit(request.user,rejection.action,rejection.obj,outcome='replayed',reason=rejection.reason,details=rejection.details)
+        # Deferred rather than recorded. This except block is still inside the
+        # write lock api() holds, so an event written here is rolled back by the
+        # re-raise on the next line and the replay leaves no trace at all. The
+        # event rides out with the exception instead and api() writes it once
+        # the transaction is over.
+        defer_audit(rejection,rejection.action,rejection.obj,rejection.details,outcome='replayed',reason=rejection.reason)
         raise
     return JsonResponse({'id':item.pk,'receipt':item.receipt_number,'amount':str(item.amount_received)},status=201 if created else 200)
 
@@ -703,8 +753,14 @@ def disable_account(request,pk):
         # still passed authenticate() and could hold a live Django session.
         if user.is_active:
             user.is_active=False;user.save(update_fields=['is_active'])
+        # ...and drop the sessions themselves. is_active only stops a *new*
+        # sign-in; rows in django_session outlive it, so without this an already
+        # signed-in device keeps working and re-enabling the account would restore
+        # it. A user has one session per browser, so this is not a single row.
+        revoked=revoke_sessions(user)
+        logger.info('account.disable revoked %d session(s) for %s',revoked,user.username)
         SecretaryInvite.objects.filter(organization=access.organization,created_by=user,used_at__isnull=True,revoked_at__isnull=True).update(revoked_at=timezone.now())
-        audit(request.user,'account.disabled',user)
+        audit(request.user,'account.disabled',user,{'sessions_revoked':revoked})
     return JsonResponse({'ok':True,'already_disabled':False})
 
 @api
@@ -753,7 +809,10 @@ def import_preview(request):
         try:
             if kind=='members':fill_member(Member(organization=organization_for(request.user)),row)
             else:
-                member=visible_members(request.user).get(pk=int(row['member_id']))
+                try:member_id=int(row['member_id'])
+                except (TypeError,ValueError):raise ValueError('member_id must be a number.')
+                member=visible_members(request.user).filter(pk=member_id).first()
+                if not member:raise ValueError('that member ID is not in this organization.')
                 plan_payment(member,parse_amount(row['amount']),parse_month(row['start_month']))
                 payment_date=date.fromisoformat(row['payment_date'])
                 if not date(2000,1,1)<=payment_date<=timezone.localdate():raise ValueError('Invalid payment date.')
@@ -762,7 +821,7 @@ def import_preview(request):
                     limit = Payment._meta.get_field(field).max_length
                     if len(str(row.get(field, '')).strip()) > limit:
                         raise ValueError(f'{field.capitalize()} must be {limit} characters or fewer.')
-        except (ValueError,ValidationError,Member.DoesNotExist) as e:raise ValueError(f'Row {i}: {e}')
+        except (ValueError,ValidationError) as e:raise ValueError(f'Row {i}: {e}')
     token=signing.dumps({'rows':rows,'kind':kind,'user':request.user.pk,'organization':organization_for(request.user).pk},salt='csv-import',compress=True)
     return JsonResponse({'token':token,'count':len(rows),'preview':rows[:8],'kind':kind})
 
@@ -771,21 +830,26 @@ def import_preview(request):
 def import_commit(request):
     # Recorded whatever happens, so a bulk write that fails halfway leaves a
     # trace. outcome/reason say which; the row count in the details is zero
-    # because the batch is rolled back with everything it created.
+    # because the batch is rolled back with everything it created. Every one of
+    # these is deferred rather than written here: the preview expiry and the
+    # duplicate file are refused before the batch exists but still inside the
+    # write lock api() holds, and the failure below is raised out of it, so an
+    # event written at any of these three points is rolled back before it can be
+    # read. api() writes them once the transaction is over.
     try:
         payload=signing.loads(body(request).get('token',''),salt='csv-import',max_age=600)
-    except signing.BadSignature:
-        audit(request.user,'import.rejected',outcome='rejected',reason='preview_expired')
-        raise ValueError('The preview expired. Upload the file again.')
+    except signing.BadSignature as expired:
+        raise defer_audit(ValueError('The preview expired. Upload the file again.'),
+                          'import.rejected',outcome='rejected',reason='preview_expired') from expired
     if payload.get('organization') != organization_for(request.user).pk:raise ValueError('This preview belongs to another organization.')
     if payload['user']!=request.user.pk:raise ValueError('This preview belongs to another user.')
     digest=hashlib.sha256(json.dumps({'kind':payload['kind'],'rows':payload['rows']},sort_keys=True).encode()).hexdigest()
     if ImportBatch.objects.filter(organization=organization_for(request.user),digest=digest).exists():
-        # Refused before the batch exists, so there is nothing to attach it to and
-        # no transaction to roll it back with: this one can be recorded directly.
-        audit(request.user,'import.rejected',outcome='replayed',reason='duplicate_file',
-              details={'kind':payload['kind'],'rows':len(payload['rows'])})
-        raise ValueError('This exact file has already been imported.')
+        # Refused before the batch exists, so there is nothing to attach it to.
+        raise defer_audit(ValueError('This exact file has already been imported.'),
+                          'import.rejected',
+                          details={'kind':payload['kind'],'rows':len(payload['rows'])},
+                          outcome='replayed',reason='duplicate_file')
     try:
         with transaction.atomic():
             batch=ImportBatch.objects.create(organization=organization_for(request.user),digest=digest,kind=payload['kind'],row_count=len(payload['rows']),created_by=request.user)
@@ -797,12 +861,11 @@ def import_commit(request):
                     record_payment(row,request.user)
             audit(request.user,'import.completed',batch,{'kind':batch.kind,'rows':batch.row_count})
     except Exception as error:
-        # Recorded after the rollback, for the same reason as the payment replay:
-        # written inside the transaction it would have been undone with it. The
-        # message is the exception text, which is a validation message or a
-        # database error already scrubbed for display by api().
-        audit(request.user,'import.failed',outcome='failure',reason=type(error).__name__,
-              details={'kind':payload['kind'],'rows':len(payload['rows']),'message':str(error)[:200]})
+        # Deferred for the same reason as the payment replay. api() also keeps
+        # the response message: the exception text is a validation message, or a
+        # database error api() has already scrubbed before it is shown.
+        defer_audit(error,'import.failed',details={'kind':payload['kind'],'rows':len(payload['rows']),'message':str(error)[:200]},
+                    outcome='failure',reason=type(error).__name__)
         raise
     return JsonResponse({'count':batch.row_count})
 

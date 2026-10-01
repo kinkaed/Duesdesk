@@ -130,6 +130,33 @@ class ProductionConfigFailsClosedTests(SimpleTestCase):
             with self.subTest(app_env=bad):
                 self.assert_refused(self.boot(APP_ENV=bad), 'APP_ENV must be exactly one of')
 
+    def test_debug_is_refused_in_production(self):
+        # Previously this was only caught by `check --deploy`, which runs as a
+        # deploy step. Anything else that booted production config - a shell, a
+        # one-off command - got a live service serving tracebacks.
+        for value in ('true', '1', 'yes', 'on', 'True', 'YES'):
+            with self.subTest(django_debug=value):
+                self.assert_refused(self.boot(DJANGO_DEBUG=value),
+                                    'DJANGO_DEBUG must not be enabled when APP_ENV=production')
+
+    def test_production_without_debug_still_boots(self):
+        # The guard must refuse only the combination, not production itself, or
+        # every deploy would fail.
+        for value in (None, 'false', '0', 'no', 'off'):
+            with self.subTest(django_debug=value):
+                result = self.boot(DJANGO_DEBUG=value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('POSTURE 1 1 True', result.stdout)
+
+    def test_debug_is_still_allowed_outside_production(self):
+        # Local development and the test runner both rely on it; refusing it
+        # there would break the way the project is actually worked on.
+        for app_env in ('local', 'test'):
+            with self.subTest(app_env=app_env):
+                result = self.boot(APP_ENV=app_env, DJANGO_DEBUG='true',
+                                   ALLOWED_HOSTS='localhost', CSRF_TRUSTED_ORIGINS=None)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_the_render_blueprint_states_every_value_settings_demands(self):
         # Settings requires ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS. A blueprint
         # that omits one produces a service that will not boot, so the two lists

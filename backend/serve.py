@@ -34,6 +34,22 @@ def main():
 
     from django.conf import settings
 
+    from ledger.observability import technical
+
+    # Once per process, at the single canonical place the service actually
+    # starts. It goes to the technical log rather than the audit trail on
+    # purpose: a startup is not a tenant event, and an AuditEvent with no
+    # organization is returned by no tenant query, so a row here would be
+    # invisible to every auditor while still growing a table forever. The log is
+    # where an operator looking at a deploy actually looks.
+    #
+    # serve.py is the only production entry point (render.yaml startCommand), so
+    # this cannot double up the way an AppConfig.ready() hook would across
+    # migrate, collectstatic, tests and every management command.
+    technical('system.startup', 'Duesdesk starting',
+              environment=os.environ.get('APP_ENV'),
+              debug=settings.DEBUG)
+
     host = '0.0.0.0'
     port = int(os.environ.get('PORT', '10000'))
     print(f'Serving on http://{host}:{port} (waitress)')

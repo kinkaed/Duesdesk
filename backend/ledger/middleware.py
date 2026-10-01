@@ -11,6 +11,49 @@ from .observability import (
     reset_context,
     technical,
 )
+from .services import audit
+
+
+def csrf_failure(request, reason=''):
+    """Record a CSRF refusal, then render Django's own failure page unchanged.
+
+    A rejection is the CSRF control working: a state-changing request arrived
+    without a valid token and was stopped before it could change anything. That
+    is exactly the kind of event the audit history exists for, and before this
+    view existed it produced no row at all, so the taxonomy advertised a security
+    event that could never appear.
+
+    CSRF_FAILURE_VIEW is the documented extension point for this and is
+    configured in settings. Subclassing CsrfViewMiddleware to override its private
+    `_reject` was the obvious alternative and was rejected: Django's W003 and
+    W016 deploy checks identify the middleware by exact dotted-path string, so a
+    subclass silently reports that CSRF protection is switched off and stops
+    checking CSRF_COOKIE_SECURE. Keeping Django's own middleware in place and
+    observing the refusal here means both checks keep working unchanged.
+
+    Every refusal passes through here regardless of which check failed, so no
+    failure mode is missed and none of the checks are reimplemented.
+
+    Attribution: Django resolves the refusal inside `_get_response`, after
+    AuthenticationMiddleware has run, so request.user is available and a refusal
+    against a signed-in account is filed under that account's organization. An
+    anonymous refusal has no organization and none is invented for it; the row
+    has a null organization, which no tenant query returns. The same rule the
+    rest of the audit path follows.
+
+    Only Django's own fixed reason string is recorded. The submitted token, the
+    cookie and the POST body are never read, so this cannot become a place where
+    a token reaches a table an auditor can read.
+    """
+    user = getattr(request, 'user', None)
+    audit(user, 'security.csrf.failure', outcome='rejected', reason=reason,
+          resource='Request')
+    technical('security.csrf.failure', 'Request refused by the CSRF check',
+              reason=str(reason)[:120])
+    # The real page, unchanged: same status, same wording, same no-JavaScript
+    # behaviour. The response a user sees must not depend on the audit trail.
+    from django.views.csrf import csrf_failure as django_csrf_failure
+    return django_csrf_failure(request, reason=reason)
 
 # One access log line per request is the point of correlation, but static assets
 # and health probes would drown it. They are skipped, not logged at debug.

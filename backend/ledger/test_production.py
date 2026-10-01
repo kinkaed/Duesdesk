@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import patch
@@ -18,7 +18,7 @@ from django.utils import timezone
 from django.core import mail
 from openpyxl import load_workbook
 from .models import Member, UserAccess, Payment, AuditEvent, ImportBatch
-from .services import next_month, parse_month, record_payment, report_horizon, void_payment
+from .services import RATE, next_month, parse_month, record_payment, report_horizon, void_payment
 from .views import member_rows
 from . import views as ledger_views
 from google_auth.testsupport import GoogleTestMixin
@@ -369,9 +369,30 @@ class OperationalTests(GoogleTestMixin, TestCase):
         def summary(month):
             return dict(load_workbook(io.BytesIO(self.client.get(f'{url}?month={month:%Y-%m}').content))['Summary'].values)
 
-        # Nothing paid yet: arrears cover every month up to the selected one.
-        self.assertEqual(summary(today)['Outstanding through ' + today.strftime('%B %Y')], 25)
-        self.assertEqual(summary(tail)['Outstanding through ' + tail.strftime('%B %Y')], 125)
+        def owing_through(month):
+            """Dues owed from the member's own joining month up to a report month.
+
+            Derived rather than hard-coded. The expected figure used to be a
+            literal 25 and 125, which silently assumed the joining month and the
+            month this test happened to run in were the same one. They stopped
+            being the same the month after setUp's 2026-09, and the test then
+            failed with 50 against 25 while the report was right: a member who
+            joined in September owes for September and for October. Counting the
+            span off the record keeps the assertion about the report rather than
+            about the calendar.
+            """
+            count, cursor = 0, self.member.joined.replace(day=1)
+            while cursor <= month:
+                count += 1
+                cursor = next_month(cursor)
+            return count * RATE
+
+        # Nothing paid yet: arrears cover every month from joining up to the
+        # selected one.
+        self.assertEqual(summary(today)['Outstanding through ' + today.strftime('%B %Y')],
+                         owing_through(today))
+        self.assertEqual(summary(tail)['Outstanding through ' + tail.strftime('%B %Y')],
+                         owing_through(tail))
         self.assertIn('through ' + tail.strftime('%B %Y'), summary(tail)['Report coverage'])
         # A payment covering later months is still reported for an earlier month.
         record_payment({**self.payload, 'start_month': f'{today:%Y-%m}',
@@ -379,7 +400,19 @@ class OperationalTests(GoogleTestMixin, TestCase):
         book = load_workbook(io.BytesIO(self.client.get(f'{url}?month={today:%Y-%m}').content))
         self.assertEqual(book['Payments'].max_row, 2)
         self.assertEqual(book['Months covered'].max_row, 5)
-        self.assertEqual(dict(book['Summary'].values)['Outstanding through ' + today.strftime('%B %Y')], 0)
+        # What the payment actually covered within the reported range, read back
+        # out of the workbook rather than assumed. A payment starting at the
+        # report month allocates nothing to the months before it, so any month
+        # from joining up to the one before still stands outstanding: the answer
+        # is what was owed minus what was paid, which is not zero unless the
+        # joining month happened to be the month this test ran in.
+        allocated_up_to = Decimal('0')
+        for row in book['Months covered'].iter_rows(min_row=2, values_only=True):
+            covered = datetime.strptime(row[1], '%B %Y').date()
+            if covered <= today:
+                allocated_up_to += Decimal(str(row[2]))
+        self.assertEqual(dict(book['Summary'].values)['Outstanding through ' + today.strftime('%B %Y')],
+                         owing_through(today) - allocated_up_to)
         # The filename contract is unchanged: it carries the generation date.
         response = self.client.get(f'{url}?month={tail:%Y-%m}')
         self.assertIn(f'filename="{self.member.code}-payment-report-{timezone.localdate().isoformat()}.xlsx"',

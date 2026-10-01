@@ -51,6 +51,17 @@ def csv_values(value):
 
 
 if PRODUCTION:
+    # Refused at import rather than left to `manage.py check --deploy`, which is
+    # what currently catches it. That check only runs as a deploy step, so any
+    # production process started another way — a shell, a one-off command, a
+    # second service on the same image — would have booted with DEBUG on and
+    # served tracebacks with settings and environment detail to anybody who asked.
+    # Refusing to import means there is no such process, whatever ran it.
+    if DEBUG:
+        raise ImproperlyConfigured(
+            'DJANGO_DEBUG must not be enabled when APP_ENV=production. Unset it, '
+            'or set APP_ENV=local for a machine that is not serving anyone.'
+        )
     SECRET_KEY = required('DJANGO_SECRET_KEY')
     if len(SECRET_KEY) < 50:
         raise ImproperlyConfigured('Use a random DJANGO_SECRET_KEY of at least 50 characters.')
@@ -94,6 +105,9 @@ MIDDLEWARE = [
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    # Django's own CSRF middleware, unmodified, so the W003 and W016 deploy
+    # checks that identify it by dotted path keep working. The refusal is
+    # observed by the failure view below rather than by subclassing.
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'allauth.account.middleware.AccountMiddleware',
@@ -135,6 +149,11 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 WHITENOISE_USE_FINDERS = not PRODUCTION
+# WhiteNoise caches the list of discoverable files at startup, so with USE_FINDERS
+# a file added or changed while the dev server is running 404s or serves stale
+# until a restart. Re-scan on each request outside production, where the cache
+# and the hashed filenames are what make static serving cheap.
+WHITENOISE_AUTOREFRESH = not PRODUCTION
 # Hashed manifest storage makes {% static %} depend on a collected staticfiles.json,
 # so a stale or uncollected manifest silently 404s the auth and receipt stylesheets.
 # Only production pays for the cache-busting hashes; local dev resolves names directly.
@@ -153,6 +172,10 @@ SESSION_COOKIE_AGE = 3600
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_COOKIE_SECURE = PRODUCTION
 CSRF_COOKIE_SECURE = PRODUCTION
+# Records security.csrf.failure, then renders Django's own failure page exactly
+# as it would have been rendered. Wrapping the documented view rather than
+# subclassing the middleware keeps the W003/W016 deploy checks meaningful.
+CSRF_FAILURE_VIEW = 'ledger.middleware.csrf_failure'
 origins = csv_values(os.environ.get('CSRF_TRUSTED_ORIGINS', ''))
 if RENDER_EXTERNAL_HOSTNAME:
     https_origin = f'https://{RENDER_EXTERNAL_HOSTNAME}'

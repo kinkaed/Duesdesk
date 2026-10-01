@@ -54,6 +54,7 @@ MESSAGES = {
     'no_code': 'Enter the 6-digit code we emailed you.',
     'cooldown': 'Please wait a moment before asking for another code.',
     'hourly_cap': 'Too many codes requested. Please try again later.',
+    'send_failed': 'We could not send that email. Please try again in a moment.',
     'no_pending': 'This sign-up has expired. Please sign up again.',
     'code_sent': 'We emailed you a 6-digit code.',
     'invite_invalid': 'This invitation is no longer valid.',
@@ -107,9 +108,36 @@ def create(request, form, organization_name, invite_token='', palette=None, logo
     try:
         with transaction.atomic():
             # Latest submission wins, so two pending signups can never compete
-            # for one address.
-            PendingSignup.objects.filter(email=email).delete()
-            pending.save()
+            # for one address. The row is overwritten in place rather than
+            # deleted and recreated, because the send history on it is what the
+            # resend cooldown and the hourly cap are measured against. Deleting
+            # it would let a resubmission reset both, which is an unlimited way
+            # to keep emailing one address.
+            previous = PendingSignup.objects.select_for_update().filter(email=email).first()
+            if previous is None:
+                pending.save()
+            else:
+                # Latest submission wins, so the new values overwrite the old ones
+                # in place. What deliberately survives is the send history,
+                # because that is the cap's memory: rewriting it would let a
+                # resubmission reset the cooldown and the hourly cap, which is an
+                # unlimited way to keep emailing one address. The invitation hash
+                # survives for the same reason, since coming back through "wrong
+                # email" posts the form again without the token in the query
+                # string and losing it would strand an invited secretary.
+                for field in ('username', 'organization_name', 'password_hash',
+                              'palette', 'logo', 'token', 'expires_at'):
+                    setattr(previous, field, getattr(pending, field))
+                previous.invite_token_hash = (pending.invite_token_hash
+                                              or previous.invite_token_hash)
+                # The code itself is void on resubmission, but not the record that
+                # one was sent, because the cap still has to be able to count it.
+                previous.code_hash = ''
+                previous.code_expires_at = None
+                previous.code_attempts = 0
+                previous.code_dead = False
+                previous.save()
+                pending = previous
     except IntegrityError:
         logger.exception('Could not store a pending signup for %s', email)
         return None, 'We could not start your sign-up. Please try again.'
@@ -162,14 +190,38 @@ def send_code(request, pending):
         + [now.isoformat()]
     pending.save(update_fields=['code_hash', 'code_expires_at', 'code_attempts',
                                 'code_dead', 'code_sends'])
-    send_mail(
-        subject='Your Duesdesk verification code',
-        message=f'Your Duesdesk verification code is {digits}.\n\n'
-                'It expires in 10 minutes. If you did not request it, ignore this email.',
-        from_email=None,
-        recipient_list=[pending.email],
-        fail_silently=True,
-    )
+    try:
+        sent = send_mail(
+            subject='Your Duesdesk verification code',
+            message=f'Your Duesdesk verification code is {digits}.\n\n'
+                    'It expires in 10 minutes. If you did not request it, ignore this email.',
+            from_email=None,
+            recipient_list=[pending.email],
+            # Not silent any more. fail_silently=True swallowed a provider
+            # outage and returned 0 as if it had worked, so the page told the
+            # user "we emailed you a code" and then asked them to enter a code
+            # that was never sent. The cooldown and the hourly cap had also
+            # already been spent on it, so retrying straight away was refused
+            # too. The delivery is now checked and the code state is put back
+            # when nothing went out.
+            fail_silently=False,
+        )
+        delivered = sent > 0
+    except Exception:
+        logger.exception('Verification email delivery failed')
+        delivered = False
+    if not delivered:
+        # Put the row back the way it was before this attempt: no code, and no
+        # send stamped, so a working provider on the next try is not locked out
+        # by the cooldown for a mail that never left.
+        pending.code_hash = ''
+        pending.code_expires_at = None
+        pending.code_attempts = 0
+        pending.code_dead = False
+        pending.code_sends = [t.isoformat() for t in stamps if now - t < timedelta(hours=1)]
+        pending.save(update_fields=['code_hash', 'code_expires_at', 'code_attempts',
+                                    'code_dead', 'code_sends'])
+        return MESSAGES['send_failed']
     return ''
 
 

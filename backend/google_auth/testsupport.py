@@ -107,12 +107,16 @@ class GoogleTestMixin:
         """Submit the signup form and land on the verification page."""
         client = client or self.client
         url = SIGNUP_PAGE + ('?invite=' + invite if invite else '')
+        email = (data.get('email') or '').strip().lower()
         with override_settings(**GOOGLE_SETTINGS):
             response = client.post(url, data)
         self.assertEqual(response.status_code, 302, getattr(response, 'content', b'')[:300])
         self.assertEqual(response.url, VERIFY_PAGE)
         # Kept so a test can prove a failed completion did not spend the code.
-        self.pending_code_hash = PendingSignup.objects.get().code_hash
+        # Scoped to this address, because a test may hold several pending
+        # signups at once when it is checking that one address does not consume
+        # another's budget.
+        self.pending_code_hash = PendingSignup.objects.get(email=email).code_hash
         return response
 
     def pending(self, email=None):

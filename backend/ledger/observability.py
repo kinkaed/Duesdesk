@@ -73,6 +73,12 @@ OUTCOMES = frozenset({'success', 'failure', 'denied', 'rejected', 'replayed'})
 # to no tenant at all, so allowlisting it would only trade a useful refusal for
 # an invisible row. The denial is attributed to the organization the account
 # actually belongs to instead, at the call site.
+#
+# Every name here must have a label in audit_taxonomy.ACTIONS and a real writer,
+# and both directions are tested: an event declared here that nothing produces is
+# a promise the audit history cannot keep, so it is removed rather than kept for
+# symmetry. security.suspicious_request and system.startup were removed for
+# exactly that reason; see the audit document for what replaced them.
 ANONYMOUS_ACTIONS = frozenset({
     'auth.login.success',
     'auth.login.failure',
@@ -80,8 +86,6 @@ ANONYMOUS_ACTIONS = frozenset({
     'auth.recovery.requested',
     'security.account_locked',
     'security.csrf.failure',
-    'security.suspicious_request',
-    'system.startup',
 })
 
 

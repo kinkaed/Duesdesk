@@ -351,6 +351,10 @@ class SignupTests(GoogleTestMixin, TestCase):
         # finishing it again consumes the same invitation.
         self.assertContains(page, 'Join Inviting Organization')
         self.client.post('/signup/', self.data())
+        # The send history survives the resubmission, so the resend cooldown
+        # still applies and a fresh code is only emailed once it has passed.
+        self.age_the_pending(code_sends=[(timezone.now() - timedelta(minutes=5)).isoformat()])
+        self.client.post('/signup/verify/', {'action': 'resend'})
         self.client.post('/signup/verify/', {'action': 'code', 'code': self.emailed_code()})
 
         user = User.objects.get(username='new-signup')

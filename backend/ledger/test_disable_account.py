@@ -67,6 +67,89 @@ class DisableAccountTests(GoogleTestMixin, TestCase):
         self.assertEqual(fresh.get('/api/members/').status_code,401)
         self.assertEqual(fresh.get('/api/overview/').status_code,401)
 
+    # Clearing is_active stops a new sign-in. It does not end a sign-in that has
+    # already happened: the session rows outlive the flag. These assert the
+    # behaviour an attacker or a locked-out user would actually observe, not the
+    # presence or absence of a database row.
+
+    def signed_in_session(self):
+        """A client holding a genuinely authenticated session for the target."""
+        client=self.sign_in('colleague')
+        self.assertEqual(client.get('/api/members/').status_code,200)
+        return client
+
+    def test_disable_ends_a_session_that_was_already_signed_in(self):
+        session=self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # The old cookie is presented again and must no longer authenticate.
+        self.assertEqual(session.get('/api/members/').status_code,401)
+        self.assertEqual(session.get('/api/overview/').status_code,401)
+
+    def test_re_enabling_does_not_revive_the_old_session(self):
+        session=self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.enable(self.target).status_code,200)
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.is_active)
+        # The account is usable again, but not through the cookie it had before.
+        # Without this the disable would be cosmetic.
+        self.assertEqual(session.get('/api/members/').status_code,401)
+
+    def test_fresh_sign_in_works_after_re_enabling(self):
+        self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.enable(self.target).status_code,200)
+        fresh=self.sign_in('colleague')
+        self.assertEqual(fresh.get('/api/members/').status_code,200)
+
+    def test_disable_revokes_every_session_not_just_the_first(self):
+        # One row per browser, so a user signed in on a phone and a laptop holds
+        # two. Only deleting the newest would leave the other working.
+        phone=self.sign_in('colleague')
+        laptop=self.sign_in('colleague')
+        desktop=self.sign_in('colleague')
+        for client in (phone,laptop,desktop):
+            self.assertEqual(client.get('/api/members/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        for client in (phone,laptop,desktop):
+            self.assertEqual(client.get('/api/members/').status_code,401)
+
+    def test_disable_leaves_other_accounts_signed_in(self):
+        other=User.objects.create_user('auditor',email='auditor@example.com',password=self.password)
+        UserAccess.objects.create(organization=self.org,user=other,role='auditor')
+        colleague=self.signed_in_session()
+        bystander=self.sign_in('auditor')
+        self.assertEqual(bystander.get('/api/members/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # Revocation is scoped to the account that was disabled.
+        self.assertEqual(colleague.get('/api/members/').status_code,401)
+        self.assertEqual(bystander.get('/api/members/').status_code,200)
+
+    def test_disable_records_how_many_sessions_were_ended(self):
+        self.signed_in_session()
+        self.sign_in('colleague')
+        self.assertEqual(self.disable(self.target).status_code,200)
+        details=json.loads(AuditEvent.objects.filter(action='account.disabled',entity_id=str(self.target.pk)).get().details)
+        self.assertEqual(details['sessions_revoked'],2)
+
+    def test_disable_while_signed_in_does_not_break_the_acting_session(self):
+        # A secretary disables a colleague from their own browser. Only the
+        # target's sessions may be touched, or the person performing a routine
+        # administrative action would be signed out by doing it.
+        self.signed_in_session()
+        self.assertEqual(self.client.get('/api/overview/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.client.get('/api/overview/').status_code,200)
+        self.assertEqual(self.client.get('/api/accounts/').status_code,200)
+
+    def test_already_disabled_account_is_left_alone(self):
+        self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # A repeat press must not report a second revocation: the sessions are
+        # already gone and the count would be misleading.
+        details=json.loads(AuditEvent.objects.filter(action='account.disabled',entity_id=str(self.target.pk)).get().details)
+        self.assertEqual(details['sessions_revoked'],1)
+
     def test_history_survives_disable(self):
         payment=self.record_payment()
         self.assertEqual(self.disable(self.target).status_code,200)
