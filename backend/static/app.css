@@ -13,6 +13,7 @@
   --green:#214f43;
   --danger:#a44835;
   --danger-soft:#fbece7;
+  --ok:#2f6b45;
   --radius:8px;
   --radius-lg:12px;
   --org-primary:#214f43;
@@ -29,6 +30,7 @@ a{color:var(--green)}
 button:focus-visible,a:focus-visible{outline:2px solid #4f7a5f;outline-offset:2px}
 input:focus,select:focus{outline:2px solid #4f7a5f;outline-offset:1px;border-color:#4f7a5f}
 [hidden]{display:none!important}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 h1{margin:0 0 8px;font-size:26px;line-height:1.25;letter-spacing:-.4px;font-weight:600}
 h2{font-size:17px;font-weight:600}
 p{margin:0 0 12px;color:var(--muted)}
@@ -58,6 +60,31 @@ input,select{width:100%;border:1px solid var(--line-strong);border-radius:var(--
 #logo-error:empty{display:none}
 #theme-preview{margin:16px 0;padding:14px;border-radius:var(--radius);font-size:13px}
 .palette-note{font-size:12.5px}
+
+/* Live field feedback on the sign-up form and the password show/hide control.
+   The colours go through the same tokens as the rest of the page, so a themed
+   organization still reads correctly. */
+.field-status{margin:5px 0 0;font-size:12.5px;color:var(--muted)}
+.field-status.valid{color:var(--ok)}
+.field-status.invalid{color:var(--danger)}
+input.is-valid{border-color:var(--ok)}
+input.is-invalid{border-color:var(--danger)}
+.password-field{position:relative;display:block}
+.password-field input{padding-right:66px}
+.password-toggle{position:absolute;top:50%;right:6px;transform:translateY(-50%);border:0;background:transparent;color:var(--muted);font-size:12.5px;font-weight:600;padding:4px 7px;border-radius:6px;min-height:auto;line-height:1}
+.password-toggle:hover{background:var(--line);color:var(--ink)}
+.password-toggle:focus-visible{outline:2px solid #4f7a5f;outline-offset:2px}
+
+/* The password rules Django already lists, marked up live. The marker and the
+   wording carry the state, so colour is a reinforcement and never the only
+   signal. `info` is a rule the browser cannot judge and the server will. */
+.password-rules{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:3px}
+.password-rules li{display:flex;align-items:flex-start;gap:7px;margin:0;color:var(--muted)}
+.password-rules li[data-state=met]{color:var(--ok)}
+.password-rules li[data-state=info]{color:var(--faint)}
+.rule-mark{width:15px;height:15px;flex:0 0 15px;margin-top:2.5px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.rule-mark-dot{fill:currentColor;stroke:none}
+.button:disabled{opacity:.65;cursor:default;filter:none}
 
 /* Receipt */
 .receipt-page{padding:32px 20px;background:#f2f5f1}

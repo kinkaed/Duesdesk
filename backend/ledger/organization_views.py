@@ -57,6 +57,19 @@ def logo(request, public_id):
     return response
 
 
+# The theme preview on the sign-up page needs rows to draw. They are invented here
+# rather than queried, which is the point: a preview must never read a real
+# member, and a preview that did would leak one to somebody signing up. The badge
+# classes match the statuses the application renders, so the preview shows what
+# the real table will look like.
+PREVIEW_MEMBERS=(
+    {'name':'Ama Mensah','code':'MBR-0001','status':'paid','status_label':'Paid','arrears':'—'},
+    {'name':'Kwame Boateng','code':'MBR-0002','status':'partial','status_label':'Partial','arrears':'GH₵ 50'},
+    {'name':'Akosua Owusu','code':'MBR-0003','status':'unpaid','status_label':'Unpaid','arrears':'GH₵ 175'},
+    {'name':'Kofi Asante','code':'MBR-0004','status':'not-due','status_label':'Not due','arrears':'GH₵ 25'},
+)
+
+
 @require_http_methods(['GET','POST'])
 def signup(request):
     if request.user.is_authenticated:return redirect('/')
@@ -116,7 +129,8 @@ def signup(request):
     context={
         'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
         'palette':{k:request.POST.get(k,(kept or {}).get('palette',{}).get(k,v)) for k,v in DEFAULTS.items()},
-        'logo_token':logo_token}
+        'logo_token':logo_token,
+        'preview_members':PREVIEW_MEMBERS}
     # An invitation brings its organization with it, so the card is shown in that
     # organization's colors and logo.
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))

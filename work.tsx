@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUpRight, Check, CircleAlert, CreditCard, FileText, LayoutDashboard, LogOut, Plus, Search, Settings2, ShieldCheck, Users, X } from 'lucide-react';
+import { paletteWarnings, themeStyle } from './theme-bridge';
 import { api, csrf, formData, money, signOut, type Branding, type Allocation, type AuditChange, type AuditDetail, type AuditEvent, type AuditPage, type Member, type MemberProfile, type Overview, type Payment, type Session } from './api';
 
 type Page='overview'|'members'|'payments'|'reports'|'manage'|'audit'|'profile';
@@ -48,7 +49,13 @@ export default function App(){
  useEffect(()=>{let alive=true;api<Session>('/api/session/').then(s=>{if(alive){setSession(s);setMonth(current=>current||s.today.slice(0,7));}}).catch(e=>{if(alive){setError(errorText(e));setLoading(false);}});return()=>{alive=false;};},[revision]);
  useEffect(()=>{if(!month)return;let alive=true;setLoading(true);api<Overview>('/api/overview/?month='+month).then(d=>{if(alive){setData(d);setError('');}}).catch(e=>{if(alive)setError(errorText(e));}).finally(()=>{if(alive)setLoading(false);});return()=>{alive=false;};},[month,revision]);
  useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(''),4500);return()=>clearTimeout(t);},[toast]);
- useEffect(()=>{if(!session)return;const b=session.branding;for(const key of ['primary','secondary','accent','primary_text','secondary_text','accent_text'] as const)document.documentElement.style.setProperty('--org-'+key.replace('_','-'),b[key]);return()=>{for(const key of ['primary','secondary','accent','primary-text','secondary-text','accent-text'])document.documentElement.style.removeProperty('--org-'+key);};},[session]);
+ // The preview has to paint the live palette, so the unsaved values are set on a
+// container rather than on the document. The document keeps the saved palette:
+// painting it here would recolour the Settings page itself, which is not what
+// somebody adjusting a colour asked for, and would leave the workspace mispainted
+// if they navigated away without saving.
+const [draft,setDraft]=useState<Palette|null>(null);
+useEffect(()=>{if(!session)return;const b=session.branding;for(const key of ['primary','secondary','accent','primary_text','secondary_text','accent_text'] as const)document.documentElement.style.setProperty('--org-'+key.replace('_','-'),b[key]);return()=>{for(const key of ['primary','secondary','accent','primary-text','secondary-text','accent-text'])document.documentElement.style.removeProperty('--org-'+key);};},[session]);
  const navigation:{page:Page;icon:typeof Users}[]=[{page:'overview',icon:LayoutDashboard},{page:'members',icon:Users},{page:'payments',icon:CreditCard},{page:'reports',icon:FileText},...(write?[{page:'manage' as Page,icon:Settings2}]:[]),{page:'audit',icon:ShieldCheck}];
   const titles:Record<Page,[string,string]>={overview:['A clear view of your dues.','Track the month. Know who’s paid. Keep everything in order.'],members:['People behind the contributions.','Find a member, check their balance, or add someone new.'],payments:['Every payment, accounted for.','One receipt for every contribution, however many months it covers.'],reports:['Close the month with confidence.','Balances, collections and arrears, ready for your records.'],manage:['Your organisation, in order.','Manage accounts, import records and personalise receipts.'],audit:['A record you can follow.','Important changes, their reasons, and who made them.'],profile:['Your account.','Your details, your password, and how to sign out.']};
  if(!session)return <div className="opening"><div className="logo-mark">d.</div><h1>Duesdesk</h1>{error?<><Alert>{error}</Alert><button onClick={()=>location.reload()}>Try again</button></>:<p>Opening your workspace…</p>}</div>;
@@ -131,9 +138,96 @@ function BrandingForm({org,onSaved}:{org:Organisation;onSaved:(o:Organisation)=>
  const [palette,setPalette]=useState({primary:org.primary,secondary:org.secondary,accent:org.accent}),[token,setToken]=useState(''),[remove,setRemove]=useState(false),[preview,setPreview]=useState(org.logo_url),[busy,setBusy]=useState(false),[error,setError]=useState('');
  async function upload(file?:File){setToken('');setError('');if(!file)return;setBusy(true);try{const data=new FormData();data.append('logo',file);const response=await fetch('/api/branding/preview/',{method:'POST',headers:{'X-CSRFToken':csrf()},body:data});const result=await response.json();if(!response.ok)throw Error(result.error||'Unable to upload logo.');setToken(result.logo_token);setPalette({primary:result.primary,secondary:result.secondary,accent:result.accent});setRemove(false);const reader=new FileReader();reader.onload=()=>setPreview(String(reader.result));reader.readAsDataURL(file);}catch(e){setError(errorText(e));}finally{setBusy(false);}}
  async function save(e:FormEvent<HTMLFormElement>){e.preventDefault();setBusy(true);setError('');try{const result=await api<Organisation>('/api/settings/',{...formData(e.currentTarget),...palette,logo_token:token,remove_logo:remove});setToken('');setRemove(false);setPreview(result.logo_url?result.logo_url+'?v='+Date.now():'');onSaved(result);}catch(e){setError(errorText(e));}finally{setBusy(false);}}
- return <section className="panel manage-card"><h2>Organization & branding</h2><form onSubmit={save}><label>Organization name<input name="name" defaultValue={org.name} maxLength={120} required/></label><label>Contact details<input name="contact" defaultValue={org.contact} maxLength={200}/></label><label>Receipt message<input name="receipt_footer" defaultValue={org.receipt_footer} maxLength={250}/></label>{preview&&!remove&&<img className="brand-preview" src={preview} alt="Organization logo preview"/>}<label>Upload logo<input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={e=>upload(e.target.files?.[0])}/></label><p className="small">Up to 1 MB and 4 million pixels. Review and adjust the colors extracted from your logo.</p>{preview&&<button type="button" className="text-button danger" disabled={busy} onClick={()=>{setRemove(true);setToken('');setPreview('');}}>Remove logo</button>}<div className="palette-fields">{(['primary','secondary','accent'] as const).map(k=><label key={k}>{k}<input type="color" value={palette[k]} disabled={busy} onChange={e=>setPalette({...palette,[k]:e.target.value})}/></label>)}</div><div className="brand-sample" style={{background:palette.primary,color:contrastText(palette.primary)}}>Your organization theme <span style={{background:palette.accent,color:contrastText(palette.accent)}}>Accent</span></div><p className="small">Text automatically switches to black or white for readable contrast.</p>{error&&<Alert>{error}</Alert>}<button className="button primary" disabled={busy}>{busy?'Processing…':'Save details & theme'}</button><p><a href={'/login/?org='+org.public_id}>Branded sign-in page</a></p></form></section>;
+// The preview is the same markup the sign-up page draws, and it is driven by
+ // the same six custom properties, so a palette chosen here and one chosen
+ // during sign-up are the same thing seen in two places. It reads the live values
+ // rather than the unsaved organisation, which is the point of a preview.
+ return <section className="panel manage-card"><h2>Organization & branding</h2><form onSubmit={save}><label>Organization name<input name="name" defaultValue={org.name} maxLength={120} required/></label><label>Contact details<input name="contact" defaultValue={org.contact} maxLength={200}/></label><label>Receipt message<input name="receipt_footer" defaultValue={org.receipt_footer} maxLength={250}/></label>{preview&&!remove&&<img className="brand-preview" src={preview} alt="Organization logo preview"/>}<label>Upload logo<input type="file" accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={e=>upload(e.target.files?.[0])}/></label><p className="small">Up to 1 MB and 4 million pixels. Review and adjust the colors extracted from your logo.</p>{preview&&<button type="button" className="text-button danger" disabled={busy} onClick={()=>{setRemove(true);setToken('');setPreview('');}}>Remove logo</button>}
+ <ThemeControls palette={palette} onChange={setPalette} busy={busy} logo={preview&&!remove?preview:''}/>
+ {error&&<Alert>{error}</Alert>}<button className="button primary" disabled={busy}>{busy?'Processing…':'Save details & theme'}</button><p><a href={'/login/?org='+org.public_id}>Branded sign-in page</a></p></form></section>;
+ }
+type Palette={primary:string;secondary:string;accent:string};
+const PALETTE_ROLES:{key:keyof Palette;label:string;role:string}[]=[
+ {key:'primary',label:'Primary colour',role:'Sidebar, primary buttons, and the links inside your content.'},
+ {key:'secondary',label:'Secondary colour',role:'The selected item in the sidebar, your avatar, and the workspace tag.'},
+ {key:'accent',label:'Accent colour',role:'The logo mark, and the highlight a sidebar item takes on hover.'},
+];
+
+// One preview, used by both Settings and the sign-up page. It is drawn from the
+// real class names and reads the same --org-* variables, so it cannot drift from
+// the application. Nothing in it paints a colour and nothing in it is connected
+// to a record: the names, codes and amounts are invented.
+function ThemePreview({logo}:{logo?:string}){
+ return <div className="theme-preview">
+  <div className="theme-preview-bar"><span className="theme-preview-dots" aria-hidden="true"><i/><i/><i/></span><strong>Live preview</strong><span>Sample workspace — no real records</span></div>
+  <div className="theme-preview-scroll"><div className="theme-preview-stage">
+   <div className="app-shell">
+    <aside className="sidebar">
+     <span className="brand">{logo?<img className="org-logo" src={logo} alt=""/>:<span className="logo-mark">d.</span>}duesdesk<span>.</span></span>
+     <nav aria-label="Preview navigation">
+      <span className="nav active" aria-current="page"><LayoutDashboard size={14}/>Overview</span>
+      <span className="nav"><Users size={14}/>Members</span>
+      <span className="nav"><CreditCard size={14}/>Payments</span>
+      <span className="nav"><FileText size={14}/>Reports</span>
+     </nav>
+     <span className="user-block"><span className="avatar">AO</span><span className="user-block-text"><strong>Sample secretary</strong><small>Secretary</small></span></span>
+    </aside>
+    <main className="main">
+     <header className="topbar"><div>Workspace <span>/</span> <strong>Overview</strong></div><div className="topbar-right"><span className="workspace-tag">Sample workspace</span></div></header>
+     <div className="content">
+      <div className="page-heading"><div><h1>Overview</h1><p>Where the association stands this month.</p></div><span className="button primary"><Plus size={14}/>Record payment</span></div>
+      <div className="metrics">
+       <div className="metric"><span>Money received this month</span><strong>GH₵ 12,450</strong><small>By the date payment was received</small></div>
+       <div className="metric"><span>Outstanding this month</span><strong>GH₵ 3,175</strong><small>All billable members</small></div>
+       <div className="metric"><span>Fully paid members</span><strong>41 / 58</strong><small>Billed for this month</small></div>
+       <div className="metric"><span>Dues covered this month</span><strong>GH₵ 15,625</strong><small>Including payments in advance</small></div>
+      </div>
+      <section className="panel">
+       <div className="panel-heading"><div><h2>Member directory <span className="count">4</span></h2><p>Choose a name to open the profile and payment history.</p></div></div>
+       <div className="table-wrap"><table>
+        <caption className="sr-only">Sample member list showing each payment status</caption>
+        <thead><tr><th>Member</th><th>Status</th><th>Arrears</th><th>Actions</th></tr></thead>
+        <tbody>
+         {[['Ama Mensah','MBR-0001','Paid','paid','—'],['Kwame Boateng','MBR-0002','Partial','partial','GH₵ 50'],['Akosua Owusu','MBR-0003','Unpaid','unpaid','GH₵ 175'],['Kofi Asante','MBR-0004','Not due','not-due','GH₵ 25']].map(([name,code,label,cls,arrears])=><tr key={code}><td><span className="member-cell"><span className="member-name">{name}</span><small>{code}</small></span></td><td><span className={'badge '+cls}>{label}</span></td><td>{arrears}</td><td><span className="row-actions"><span className="text-button">View</span></span></td></tr>)}
+        </tbody>
+       </table></div>
+      </section>
+      <div className="alert"><p><b>A sample notice.</b> Payment and audit colours stay the same in every workspace, so a failure always looks like a failure.</p></div>
+     </div>
+    </main>
+   </div>
+  </div></div>
+  <p className="theme-preview-note">Every name, code and amount above is invented. Hover a sidebar item to see the accent colour.</p>
+ </div>;
 }
-function contrastText(hex:string){const rgb=hex.slice(1).match(/../g)!.map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);const luminance=.2126*rgb[0]+.7152*rgb[1]+.0722*rgb[2];return luminance>.179?'#000000':'#ffffff';}
+
+// Contrast is not decided here. branding_json already sends the readable
+// foreground for each colour the server will store, and using those means the
+// preview shows exactly the text colour the saved palette will produce.
+function ThemeControls({palette,onChange,busy,logo}:{palette:Palette;onChange:(p:Palette)=>void;busy?:boolean;logo?:string}){
+ // A theme.js that failed to load would otherwise throw inside render. Catching it
+ // here means the rest of Settings stays usable and only the live text colour is
+ // unavailable, which is a far better failure than a blank page.
+ const [warn,setWarn]=useState<string>('');
+ const style=useMemo(()=>{try{return themeStyle(palette);}catch{return {};}},[palette]);
+ const warnings=useMemo(()=>{try{return paletteWarnings(palette);}catch(e){setWarn(e instanceof Error?e.message:'Preview unavailable.');return [];}},[palette]);
+ return <fieldset className="theme-controls" disabled={busy}>
+  <legend className="eyebrow">Workspace theme</legend>
+  {PALETTE_ROLES.map(({key,label,role})=><div className="theme-row" key={key}>
+   <input type="color" value={palette[key]} aria-label={label} onChange={e=>onChange({...palette,[key]:e.target.value})}/>
+   <div><label>{label}</label><p className="theme-hex">{palette[key]}</p><p className="theme-role">{role}</p></div>
+  </div>)}
+  {warn&&<p className="small muted">{warn}</p>}
+  <div className="theme-warnings" role="status" aria-live="polite">
+   {warnings.map(w=><p className="theme-warning" key={w.message}><CircleAlert size={15}/><span>{w.message} <em>Contrast is {w.ratio}:1; {w.minimum}:1 is the minimum.</em></span></p>)}
+  </div>
+  <p className="small muted">Saved colours take effect across the workspace. Payment and audit colours never change.</p>
+  {/* The variables land on the preview, not on the document: the workspace keeps
+      the saved palette while this is being adjusted. */}
+  <div style={style}><ThemePreview logo={logo}/></div>
+ </fieldset>;
+}
+
 type Invitation={id:number;email:string;status:string;expires_at:string};
 function SecretaryTeam(){
  const [items,setItems]=useState<Invitation[]>([]),[url,setUrl]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false),[leaving,setLeaving]=useState(false),[rev,setRev]=useState(0);

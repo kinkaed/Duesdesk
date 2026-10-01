@@ -22,8 +22,48 @@ def luminance(hex_color):
 
 def text_color(background):
     # The better of black/white always achieves at least 4.5:1 for opaque sRGB.
+    # Decided by comparing the two candidate ratios rather than by testing a
+    # rounded threshold, so no magic number can drift between here and the
+    # browser copy in static/theme.js.
     value = luminance(background)
     return '#000000' if (value+0.05)/0.05 >= 1.05/(value+0.05) else '#ffffff'
+
+
+def contrast(a, b):
+    # WCAG 2.x contrast ratio, 1 to 21.
+    first, second = luminance(a), luminance(b)
+    return (max(first, second)+0.05)/(min(first, second)+0.05)
+
+
+# The sign-up preview warns about pairings nothing repairs. Text on a filled
+# surface is handled by text_color and cannot fail, so these are the two chosen
+# colours sitting next to each other, or the primary used as a link on a light
+# surface. They are reported, never corrected: silently darkening a colour the
+# user picked would hide the decision, and no such product rule exists.
+# 4.5:1 for text, 3:1 for a boundary the user has to tell apart.
+#
+# Accent against primary is deliberately absent. The two meet only at the logo
+# mark, a filled shape carrying a letter that reads as present from its outline
+# rather than its colour, and no control or status depends on telling them
+# apart. Holding it to 3:1 would warn about the palette the product ships with,
+# and a warning that is always on is a warning nobody reads. The shipped default
+# sits at 1.79:1 there; see THEME.md.
+TEXT_MINIMUM = 4.5
+BOUNDARY_MINIMUM = 3
+SURFACE = '#ffffff'
+
+
+def palette_warnings(palette):
+    checks = [
+        (contrast(palette['primary'], SURFACE), TEXT_MINIMUM,
+         'Text links and text buttons use the primary colour. They may be hard to read on white.'),
+        (contrast(palette['primary'], palette['secondary']), BOUNDARY_MINIMUM,
+         'The selected navigation item is drawn in the secondary colour. It may not stand out from the sidebar.'),
+        (contrast(palette['secondary'], palette['accent']), BOUNDARY_MINIMUM,
+         'The accent colour and the selected navigation item are used on the same sidebar. They may look too similar.'),
+    ]
+    return [{'ratio': round(ratio, 2), 'minimum': minimum, 'message': message}
+            for ratio, minimum, message in checks if ratio < minimum]
 
 
 def branding_json(org):
