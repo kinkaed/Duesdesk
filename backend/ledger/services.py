@@ -47,7 +47,7 @@ def plan_payment(member, amount, month):
     result = []
     for _ in range(240):
         if member.billing_end and month > member.billing_end:
-            raise ValueError('This payment exceeds the member’s last billable month.')
+            raise ValueError(f'This member’s dues stop at {member.billing_end:%B %Y}. To record payment for later months, edit the member and clear or extend the membership end month.')
         rate = rates.get(month, RATE)
         available = max(Decimal('0'), rate - paid.get(month, Decimal('0')))
         if available:
