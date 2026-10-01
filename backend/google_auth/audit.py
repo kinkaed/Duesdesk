@@ -27,7 +27,7 @@ def client_ip(request):
 
 
 def details_for(request, method='', reason=''):
-    details = {'provider': 'google', 'ip': client_ip(request),
+    details = {'provider': 'email' if method == 'code' else 'google', 'ip': client_ip(request),
                'timestamp': timezone.now().isoformat()}
     if method:
         details['method'] = method
@@ -72,6 +72,7 @@ def record(request, action, user=None, reason='', email='', flow='', method=''):
     details = details_for(request, method, reason)
     try:
         GoogleAuthRejection.objects.create(
+            provider='email' if method == 'code' else 'google',
             action=action, reason=(reason or '')[:60], flow=flow, method=method,
             email=(email or '')[:254], user=user, ip=details['ip'])
         logger.warning('%s %s', action, json.dumps(

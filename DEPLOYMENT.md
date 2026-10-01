@@ -125,3 +125,9 @@ This is a deployable application with tested core controls, not a claim of an in
 ## Organization migration release
 
 Read **ORGANIZATIONS.md** before deploying migrations 0005/0006. Back up Neon, rehearse on staging and pause writes during migration/cutover; the old application cannot safely serve writes after the required organization columns are added. The existing build/start commands and static manifest backend remain unchanged. Logo images are normalized and stored in PostgreSQL, so no external storage credentials are needed. Run PostgreSQL CI (including concurrent leave/invite tests) before rollout. Use `/signup/` to create a new organization or `assign_access USERNAME --role secretary --organization-id ID` to repair an existing account. `createsuperuser` alone does not grant tenant access.
+
+## Pending signup verification release
+
+See [GOOGLE-AUTH.md](GOOGLE-AUTH.md) for migrations, email-delivery requirements,
+verification tests and cleanup scheduling. Do not create a second Render service
+without approval. Render Free blocks the usual SMTP ports.

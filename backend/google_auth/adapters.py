@@ -101,6 +101,8 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
                 self.reject(request, 'identity already linked', email=claimed)
             return claimed
         if linked:
+            if not flows.same(linked.user.email, claimed):
+                self.reject(request, 'identity email mismatch', linked.user, claimed)
             stored = flows.normalize((linked.extra_data or {}).get('email'))
             if stored and stored != email:
                 self.reject(request, 'identity email mismatch', linked.user, claimed)
@@ -138,9 +140,8 @@ class GoogleAdapter(DefaultSocialAccountAdapter):
             from .views import verify_error
             raise ImmediateHttpResponse(
                 verify_error(request, 'email mismatch', email=claimed))
-        request.session[signup.GOOGLE_UID] = sociallogin.account.uid
         try:
-            signup.complete(request, pending, GOOGLE)
+            signup.complete(request, pending, GOOGLE, google_account=sociallogin.account)
         except signup.AlreadyVerified:
             self.reject(request, 'signup already completed', email=claimed)
         except signup.Invalid as error:
