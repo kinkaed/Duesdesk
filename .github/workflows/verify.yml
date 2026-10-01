@@ -16,9 +16,14 @@ jobs:
           python-version: '3.12'
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: pnpm test
+      # Before pnpm test, deliberately. The frontend suite runs branding.py to
+      # compare the server's contrast maths against the browser copy in
+      # theme.js; that is the server half of the comparison, so Django has to be
+      # on the runner by then. Installed afterwards, the parity test either
+      # cannot run or quietly compares the browser against itself.
       - run: pip install -r backend/requirements.lock
       - run: pip check
+      - run: pnpm test
       # verify_static asserts the production manifest pipeline (it reads
       # staticfiles.json and calls url(force=True)), so it must run under the
       # production storage backend. TEST_SQLITE is deliberately unset because

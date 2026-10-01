@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const read = path => fs.readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -37,12 +37,39 @@ const PALETTES = [
   { primary: '#7f1d1d', secondary: '#fef2f2', accent: '#b91c1c' },
 ];
 
-// Runs branding.py in the project interpreter and returns one JSON blob, so the
+// branding.py has to be run rather than reimplemented here, or the comparison
+// would prove nothing. It is server code, so the interpreter needs Django too,
+// and neither the venv's location nor its existence is the same everywhere: the
+// path differs per platform and CI installs the requirements into the runner's
+// own interpreter rather than a venv. So probe for one that can import Django
+// instead of assuming a path.
+function usable(exe) {
+  return !!exe && spawnSync(exe, ['-c', 'import django'], { stdio: 'ignore' }).status === 0;
+}
+
+function interpreter() {
+  const candidates = process.platform === 'win32'
+    ? [at('.venv/Scripts/python.exe'), at('.venv/Scripts/python'), 'python', 'python3']
+    : [at('.venv/bin/python'), at('.venv/bin/python3'), 'python3', 'python'];
+  const found = candidates.find(usable);
+  if (!found) {
+    throw new Error(
+      'theme-parity needs a Python interpreter with Django importable. branding.py is the ' +
+      'server half of this comparison, so installing backend/requirements.lock is part of ' +
+      'running it.',
+    );
+  }
+  return found;
+}
+
+// Runs branding.py in that interpreter and returns one JSON blob, so the
 // comparison is against the code that actually serves the palette.
 function python() {
   const script = [
     'import json,sys',
-    'sys.path.insert(0,"backend")',
+    // Absolute, and quoted by JSON.stringify: the checkout path contains spaces
+    // and, on Windows, backslashes that are not valid inside a Python literal.
+    `sys.path.insert(0,${JSON.stringify(at('backend'))})`,
     'from ledger.branding import contrast, text_color, palette_warnings',
     `palettes=json.loads(sys.argv[1])`,
     'out=[]',
@@ -54,7 +81,7 @@ function python() {
     '    })',
     'print(json.dumps(out))',
   ].join('\n');
-  return JSON.parse(execFileSync(at('.venv/Scripts/python.exe'), ['-c', script, JSON.stringify(PALETTES)], {
+  return JSON.parse(execFileSync(interpreter(), ['-c', script, JSON.stringify(PALETTES)], {
     cwd: at('.'),
     encoding: 'utf8',
   }));
