@@ -3,7 +3,7 @@ WORKDIR /app
 RUN npm install -g pnpm@11.19.0
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
-COPY tsconfig.json vite.config.ts dev.config.mjs dev.config.d.mts main.tsx work.tsx api.ts styles.css ./
+COPY tsconfig.json vite.config.ts dev.config.mjs dev.config.d.mts main.tsx work.tsx theme-bridge.ts api.ts styles.css ./
 RUN pnpm run build
 
 FROM python:3.12-slim-bookworm
