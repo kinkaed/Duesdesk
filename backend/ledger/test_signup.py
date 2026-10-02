@@ -2,8 +2,6 @@ import json
 from io import BytesIO, StringIO
 from datetime import timedelta
 
-from allauth.account.models import EmailAddress
-from allauth.socialaccount.models import SocialAccount
 from axes.models import AccessAttempt
 from django.contrib.auth.models import User
 from django.core import mail
@@ -15,8 +13,8 @@ from PIL import Image
 
 from .models import AuditEvent, Organisation, SecretaryInvite, UserAccess
 from .organization_views import token_hash
-from google_auth.models import GoogleAuthRejection, PendingSignup
-from google_auth.testsupport import GOOGLE_SETTINGS, GoogleTestMixin
+from google_auth.models import AuthRejection, PendingSignup
+from google_auth.testsupport import CODE_SETTINGS, SignupTestMixin
 
 
 def signup_data(email='new-signup@example.com', username='new-signup',
@@ -28,7 +26,7 @@ def signup_data(email='new-signup@example.com', username='new-signup',
 
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
-class SignupTests(GoogleTestMixin, TestCase):
+class SignupTests(SignupTestMixin, TestCase):
     password = 'A-Very-Strong-Signup-Password!'
 
     def data(self, email='new-signup@example.com'):
@@ -59,6 +57,18 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.assertContains(page, 'Register as a Secretary')
         self.assertContains(page, 'name="organization_name"')
         self.assertNotContains(page, 'accounts/google')
+
+    def test_no_google_control_survives_anywhere_a_visitor_can_see(self):
+        """The provider is gone, so no page may still offer or link to it."""
+        self.client.post('/signup/', self.data())
+        self.client.post('/signup/verify/', {'action': 'code', 'code': '000000'})
+
+        for path in ('/', '/login/', '/signup/', '/signup/verify/', '/account/reset/'):
+            page = self.client.get(path, follow=True)
+            body = page.content.decode('utf-8', 'replace').lower()
+            self.assertNotIn('accounts/google', body, f'{path} still links to Google')
+            self.assertNotIn('google', body, f'{path} still mentions Google')
+            self.assertNotIn('accounts.google.com', body, f'{path} still points at Google')
 
     def test_submitting_the_form_creates_nothing(self):
         response = self.client.post('/signup/', self.data())
@@ -145,7 +155,7 @@ class SignupTests(GoogleTestMixin, TestCase):
     # -------------------------------------------------------- the code path
 
     def test_a_code_is_emailed_and_is_not_stored_in_the_clear(self):
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             self.client.post('/signup/', self.data())
 
         self.assertEqual(len(mail.outbox), 1)
@@ -158,7 +168,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.assertTrue(pending.code_live())
 
     def test_the_right_code_creates_the_account_and_signs_in(self):
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.signup_with_code(self.data())
 
         self.assertRedirects(response, '/', fetch_redirect_response=False)
@@ -173,7 +183,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.assertFalse(AccessAttempt.objects.filter(username=user.username).exists())
 
     def test_the_code_is_single_use(self):
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             self.signup_with_code(self.data())
 
         self.assertFalse(PendingSignup.objects.exists())
@@ -182,7 +192,7 @@ class SignupTests(GoogleTestMixin, TestCase):
     def test_a_wrong_code_creates_nothing_and_is_counted(self):
         self.client.post('/signup/', self.data())
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
 
         self.assertEqual(response.status_code, 200)
@@ -194,7 +204,7 @@ class SignupTests(GoogleTestMixin, TestCase):
     def test_five_wrong_attempts_invalidate_the_code(self):
         self.client.post('/signup/', self.data())
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             for _ in range(5):
                 self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
             response = self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
@@ -209,7 +219,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.client.post('/signup/', self.data())
         code = self.emailed_code()
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             for _ in range(4):
                 self.client.post('/signup/verify/', {'action': 'code', 'code': 'not-six-digits'})
             response = self.client.post('/signup/verify/', {'action': 'code', 'code': code})
@@ -221,7 +231,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.client.post('/signup/', self.data())
         self.age_the_pending(code_expires_at=timezone.now() - timedelta(seconds=1))
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.client.post('/signup/verify/',
                                         {'action': 'code', 'code': self.emailed_code()})
 
@@ -241,7 +251,7 @@ class SignupTests(GoogleTestMixin, TestCase):
     def test_resend_is_held_back_by_the_cooldown(self):
         self.client.post('/signup/', self.data())
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.client.post('/signup/verify/', {'action': 'resend'})
 
         self.assertEqual(response.status_code, 200)
@@ -253,7 +263,7 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.age_the_pending(code_sends=[
             (timezone.now() - timedelta(seconds=61)).isoformat()])
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.client.post('/signup/verify/', {'action': 'resend'})
 
         self.assertEqual(response.status_code, 200)
@@ -265,23 +275,26 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.age_the_pending(code_sends=[
             (timezone.now() - timedelta(seconds=61 + i * 600)).isoformat() for i in range(5)])
 
-        with override_settings(**GOOGLE_SETTINGS):
+        with override_settings(**CODE_SETTINGS):
             response = self.client.post('/signup/verify/', {'action': 'resend'})
 
         self.assertContains(response, 'Too many codes requested', status_code=200)
         self.assertEqual(len(mail.outbox), 1)
 
-    def test_the_verification_page_offers_both_ways_to_prove_the_address(self):
+    def test_the_verification_page_offers_a_code_and_nothing_else(self):
         self.client.post('/signup/', self.data())
 
         page = self.client.get('/signup/verify/')
 
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, 'new-signup@example.com')
-        self.assertContains(page, 'Continue with Google')
         self.assertContains(page, 'Email me a code')
         self.assertContains(page, 'Wrong email? Go back')
         self.assertContains(page, 'name="code"')
+        # Only the emailed code remains; there is no second way to prove the
+        # address now that the external provider has been removed.
+        self.assertNotContains(page, 'Continue with Google')
+        self.assertNotContains(page, 'accounts/google')
 
     def test_going_back_keeps_the_typed_values_but_not_the_password(self):
         self.client.post('/signup/', self.data())
@@ -387,12 +400,13 @@ class SignupTests(GoogleTestMixin, TestCase):
 
     # -------------------------------------------------------------- auditing
 
-    def test_the_address_is_marked_verified_and_audited(self):
+    def test_the_verified_address_is_recorded_and_audited(self):
         self.signup_with_code(self.data())
 
         user = User.objects.get(username='new-signup')
-        self.assertTrue(EmailAddress.objects.get(
-            user=user, email='new-signup@example.com').verified)
+        # The user row carries the address; proof it was proven is the audit event,
+        # which survives the pending signup being consumed on completion.
+        self.assertEqual(user.email, 'new-signup@example.com')
         event = AuditEvent.objects.get(actor=user, action='signup.email_verified')
         # The address is a column on the row, not a field in the details JSON, so
         # it can be filtered in a query rather than found by parsing every row.
@@ -400,6 +414,10 @@ class SignupTests(GoogleTestMixin, TestCase):
         self.assertEqual(json.loads(event.details)['method'], 'code')
         self.assertEqual(event.organization_id, user.access.organization_id)
         self.assertTrue(event.request_id)
+        # One event per signup, not one per attempt: the audit history shows the
+        # address was proven once.
+        self.assertEqual(AuditEvent.objects.filter(
+            action='signup.email_verified').count(), 1)
 
     # ------------------------------------------------------- unrelated, kept
 
@@ -454,4 +472,4 @@ class ExistingEmailTests(TestCase):
         self.assertContains(response,
                             'An account with this email already exists, please log in.')
         self.assertFalse(PendingSignup.objects.exists())
-        self.assertEqual(GoogleAuthRejection.objects.get().reason, 'account already exists')
+        self.assertEqual(AuthRejection.objects.get().reason, 'account already exists')

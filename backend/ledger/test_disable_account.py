@@ -9,15 +9,15 @@ from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import AuditEvent, Member, Organisation, Payment, UserAccess, Allocation, DuesMonth
-from google_auth.testsupport import GoogleTestMixin
+from google_auth.testsupport import SignupTestMixin
 
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
-class DisableAccountTests(GoogleTestMixin, TestCase):
+class DisableAccountTests(SignupTestMixin, TestCase):
     def setUp(self):
         self.password='A-Very-Strong-Private-Phrase-42!'
         self.client=Client()
-        self.signup_with_google({'username':'founder','email':'founder@example.com','password1':self.password,'password2':self.password,'organization_name':'Disable Co'},client=self.client)
+        self.signup_with_code({'username':'founder','email':'founder@example.com','password1':self.password,'password2':self.password,'organization_name':'Disable Co'},client=self.client)
         self.org=Organisation.objects.get(name='Disable Co')
         self.founder=User.objects.get(username='founder')
         self.target=User.objects.create_user('colleague',email='colleague@example.com',password=self.password)
@@ -289,7 +289,7 @@ class DisableAccountTests(GoogleTestMixin, TestCase):
         self.assertFalse(User.objects.get(pk=root.pk).is_active)
 
 
-class DisableUnderUserMemberConstraintTests(GoogleTestMixin, TransactionTestCase):
+class DisableUnderUserMemberConstraintTests(SignupTestMixin, TransactionTestCase):
     """Runs outside a wrapping transaction so it can add and drop a real index."""
 
     reset_sequences = False
@@ -297,7 +297,7 @@ class DisableUnderUserMemberConstraintTests(GoogleTestMixin, TransactionTestCase
     def setUp(self):
         self.password = 'A-Very-Strong-Private-Phrase-42!'
         self.client = Client()
-        self.signup_with_google({'username': 'founder', 'email': 'founder@example.com', 'password1': self.password, 'password2': self.password, 'organization_name': 'Constraint Co'},client=self.client)
+        self.signup_with_code({'username': 'founder', 'email': 'founder@example.com', 'password1': self.password, 'password2': self.password, 'organization_name': 'Constraint Co'},client=self.client)
         self.org = Organisation.objects.get(name='Constraint Co')
         self.founder = User.objects.get(username='founder')
         self.target = User.objects.create_user('colleague', email='colleague@example.com', password=self.password)

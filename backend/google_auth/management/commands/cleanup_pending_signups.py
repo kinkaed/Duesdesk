@@ -2,7 +2,7 @@
 
 A pending signup is a stored password hash waiting to be used, so rows that can
 no longer be completed should not be left lying around. This is a plain DELETE
-and is safe to run repeatedly; see the Render cron job in GOOGLE-AUTH.md.
+and is safe to run repeatedly; see the Render cron job in AUTHENTICATION.md.
 """
 from django.core.management.base import BaseCommand
 from django.utils import timezone

@@ -20,14 +20,16 @@ Vite 7 SPA is served from `STATIC_ROOT` under `BASE=/static/app/`.
   Roles are `secretary` and `auditor`. Members are *records*, not accounts.
 - **Money:** `Payment` → `Allocation[]` → `DuesMonth`. Balances are derived from allocations.
 - **Tenancy:** enforced by `organization_for()` / `membership()` in `backend/ledger/access.py`.
-- **Auth methods:** password (Axes-throttled) and Google OAuth2 via allauth.
+- **Auth methods:** password only (Axes-throttled), plus emailed verification codes for
+  signup. The external identity provider that used to exist has been removed; see
+  [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md).
 - **Deployment:** Render web service, Neon PostgreSQL, `preDeployCommand` runs `migrate` +
   `deployment_check`.
 
-Trust boundaries that matter: unauthenticated internet → session establishment (login, Google
-callback, signup, password reset); secretary → organization-wide financial writes; auditor →
-read-only. The Google callback is the widest boundary because it is the only unauthenticated path
-that grants an existing account's privileges.
+Trust boundaries that matter: unauthenticated internet → session establishment (login,
+signup, password reset); secretary → organization-wide financial writes; auditor →
+read-only. Login and password recovery are now the only unauthenticated paths that
+grant an existing account's privileges, and both are password- or code-based.
 
 ---
 
@@ -37,12 +39,12 @@ Each heuristic is a testable rule for *this* system, not a generic checklist.
 
 | # | Heuristic | Status | Evidence |
 |---|---|---|---|
-| H1 | Every unauthenticated credential path is rate-limited per source and per identifier | **PARTIAL** | Signup cap bypass **closed and measured**: 8 POSTs produced 8 emails against a 5/hour cap because `create()` deleted the row holding `code_sends` (`signup.py:107-138`); covered by `SignupSendCapTests`. Google login/callback still have no per-source throttle; Axes is wired only to the password form (`google_auth/forms.py:9-16`) **[verified]** |
+| H1 | Every unauthenticated credential path is rate-limited per source and per identifier | **PASS** | Signup cap bypass **closed and measured**: 8 POSTs produced 8 emails against a 5/hour cap because `create()` deleted the row holding `code_sends`; a resubmission now updates that row instead of replacing it, covered by `SignupSendCapTests`. Recovery is throttled to one request per address per five minutes (`views.RecoveryView`), and Axes guards the password form (`google_auth/forms.py`) **[verified]** |
 | H2 | A payment write is idempotent and cannot be duplicated by a retry | **PASS** | `request_key` unique (`models.py:66`); replay returns existing, fingerprint mismatch rejects (`services.py:203-218`) **[verified]** |
 | H3 | `SUM(Allocation)` for a payment always equals `Payment.amount_received` | **PARTIAL** | Enforced in `check_finances.py:17` and app code only; no DB constraint can span tables (`models.py:80,90`) **[verified]** |
 | H4 | No authenticated user can read or write another organization's data | **PASS** | Org filter repeated on direct-PK lookups, 404-not-403 to prevent probing (`views.py:605-617`), name resolution re-filtered (`views.py:429-432`) **[verified]** |
 | H5 | Disabling an account revokes its live sessions immediately and permanently | **PASS** | `revoke_sessions()` deletes `django_session` rows by decoded `_auth_user_id` (`access.py:19-83`), called from `disable_account` (`views.py:711-716`); tests prove the old cookie stops working and re-enabling does not revive it **[verified]** |
-| H6 | Linking an external identity never silently converts an existing account | **FAIL** | Existing account matched by verified email and linked with no owner-consent step (`adapters.py:162-166, 179-188`). **Remediation deferred — needs a product decision; see [`DESIGN-F1-GOOGLE-LINKING.md`](DESIGN-F1-GOOGLE-LINKING.md)** **[verified]** |
+| H6 | Linking an external identity never silently converts an existing account | **PASS** | **Closed by removal.** No external identity can be presented, so no account can be converted. Accounts the provider created had no usable password and would have been locked out, so migration `0006_record_legacy_identities` writes one `LegacyIdentity` row per affected account to let them set a password; the grant is spent on first use and never applies to an account that already has a password, or to a disabled one. See [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md); covered by `test_legacy_identity.py` and `test_migrations.py` **[verified]** |
 | H7 | Every security-relevant state change writes an audit event | **PASS** | CSRF refusals are now written by the `CSRF_FAILURE_VIEW` wrapper (`middleware.py:110-150`); the two events with no legitimate producer were removed from the allowlist and taxonomy, and startup is recorded to the technical log instead (`serve.py:56-71`) **[verified]** |
 | H8 | The audit trail is append-only and cannot be edited through the app | **PASS** | Instance + QuerySet guards (`models.py:179-185`, `models.py:128-132`); DB-level `REVOKE` is a documented manual step only **[verified]** |
 | H9 | Actor and IP in an audit row are server-derived, never client-supplied | **PASS** | Actor forced from `request.user` (`services.py:44`); XFF deliberately not read (`observability.py:160-166`) **[verified]** |
@@ -64,35 +66,28 @@ Each heuristic is a testable rule for *this* system, not a generic checklist.
 
 ### High
 
-**F1 — Google sign-in converts an existing password account with no owner consent.** `adapters.py:162-166`
-resolves the user by `email__iexact`; `adapters.py:179-188` creates the `SocialAccount` link on first
-contact. Consequences:
-- Anyone who controls the victim's Google account gets the victim's secretary/auditor session.
-- The account is then *permanently* Google-locked: `adapters.py:183-184` refuses a different
-  identity afterwards, so the legitimate owner can only return via password reset.
-- `google.account_linked` (`adapters.py:205`) is the only signal, and it is not delivered to the
-  account owner.
+**F1 — An external identity could convert an existing password account with no owner consent.**
+**REMEDIATED 2026-10-01 by removing the provider.** As originally found: the sign-in path
+resolved a user by `email__iexact` and created a `SocialAccount` link on first contact, so
+anyone controlling that external account received the victim's existing secretary or auditor
+session. The account was then permanently locked to that identity — a different identity was
+refused afterwards and nothing could unlink one — leaving the legitimate owner only a password
+reset. `google.account_linked` was the only signal, and it was never delivered to the owner.
 
-Mitigating: Google's own account security is the trust anchor, and `email_verified` is checked
-server-side (`adapters.py:87, 92-93`) against a token the browser cannot forge. This is a
-**consent and notification** gap more than a bypass — but the irreversible lock-in is the part that
-matters.
+Resolution: the provider, its routes, its settings and its package are gone, so no external
+identity can be presented and no account can be converted. Accounts the provider created had no
+usable password, which Django will not send a reset link to, so removing it without a plan would
+have locked those people out of their own organizations — a worse outcome than the finding. They
+are kept reachable by `LegacyIdentity`, written by migration `0006_record_legacy_identities` for
+active passwordless accounts that carried a provider identity, and spent the moment a password is
+set. The provider's tables are left in place, so nothing was destroyed and the migration is
+reversible. See [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md) and
+[`AUTHENTICATION.md`](../AUTHENTICATION.md).
 
-**Status: still FAIL, deliberately unfixed — decision required.** The remediation depends on a
-product/security policy choice that is not derivable from the code, so it is documented rather than
-guessed. Full analysis, the options considered, a recommendation, and the resulting test plan are in
-[`DESIGN-F1-GOOGLE-LINKING.md`](DESIGN-F1-GOOGLE-LINKING.md). Recommendation: require an
-already-authenticated session before linking when the account has a usable password, and allow
-automatic linking only when it does not. Two related gaps are noted there as well: there is no way
-to unlink or replace a Google identity (no disconnect route is mounted, and nothing deletes a
-`SocialAccount`), which is what makes the lock-in permanent.
-
-**Confirmed by simulation, not only by reading.** Driving the real callback with mocked Google
-proved the whole chain end to end: a Google identity carrying an *existing* password user's verified
-email was linked with no consent step at all, and the response was a fully valid session retaining
-that user's existing **secretary** role. `SocialAccount(provider='google', uid='attacker-uid')` was
-created and `google.account_linked` was written — the event exists, but the account owner never sees
-it. The finding is a complete account takeover, not a partial one.
+Note on the original evidence: it was confirmed by simulation, not only by reading — driving the
+real callback with a mocked provider response produced a fully valid session retaining the victim's
+**secretary** role. That simulation is why the chain was treated as a complete account takeover
+rather than a partial one. Two bugs found while removing it are recorded as F6 and F7 below.
 
 ### Medium
 
@@ -180,6 +175,28 @@ exist.` and `Payment matching query does not exist.`; `import_preview` put the s
 `Row 3: ...` message. Payments now reuse the audit history's bounded page reader
 (`PAYMENT_PAGE_SIZE` / `PAYMENT_MAX_PAGE`), and the ORM wording is gone.
 
+**F13 — Every completed password reset answered a 500.** **REMEDIATED 2026-10-01.** Found while
+removing the external identity provider, in code that predates it.
+`AuditablePasswordResetConfirmView.form_valid` called `form.get_user()`; `SetPasswordForm` has no
+such method — the view binds the account as `form.user` — so the call raised `AttributeError`. It
+fired *after* `super().form_valid()`, which had already saved the new password, so the person reset
+their password and were then shown a server error, and `auth.password_reset.completed` was never
+recorded. Password recovery is the path taken by somebody who cannot get into an account, so it
+failed at the moment it mattered most, silently. The view also assumed Django signs the user in on
+this branch; `post_reset_login` is off, so it now reads the organization from the account rather than
+from a session that does not exist. Covered by `test_legacy_identity.py`.
+
+**F14 — The removal migration would have crashed on every database that had provider data.**
+**REMEDIATED 2026-10-01.** `0006_record_legacy_identities` called `user.has_usable_password()` on a
+model obtained from `apps.get_model()`, which is a *historical* model: it carries the fields declared
+in the migration state but none of `AbstractBaseUser`'s methods. The call raised `AttributeError`, and
+because `migrate` is `render.yaml`'s `preDeployCommand`, that would have blocked the release — on
+precisely the databases that had rows to migrate, while a fresh database passed untouched and hid the
+problem. It now selects the password column and applies `hashers.is_password_usable()`, the same test
+the method performs, and resolves the user table from `AUTH_USER_MODEL` rather than hard-coding
+`auth_user`. This is why `test_migrations.py` exists: a model-level test of the same logic would have
+passed throughout.
+
 ### Low
 
 **F6 — `DJANGO_DEBUG` is a deploy-time, not boot-time, guard.** **REMEDIATED 2026-09-30.**
@@ -224,9 +241,10 @@ send it used to get. Covered by `SignupSendCapTests` (8 tests), which also asser
 address is refused with the same wording as any other, so the cap is not a probe for who is
 registered.
 
-Not fixed here: the Google login and callback routes still have no per-source throttle, so H1 stays
-**PARTIAL** overall. Adding one needs care — a limit keyed on source address can lock out legitimate
-users behind a shared NAT, which would turn a rate limit into an availability problem.
+H1 is **PASS** overall: the provider's unthrottled routes no longer exist, and the paths that
+remain are throttled per identifier. Worth noting for anything added later — a limit keyed on
+source address can lock out legitimate users behind a shared NAT, which would turn a rate limit
+into an availability problem.
 
 **H2 — Signup told the user a code was emailed when nothing was sent.** **REMEDIATED 2026-10-01.**
 Found by simulating a provider outage. `send_code` called `send_mail(fail_silently=True)`, which
@@ -270,8 +288,9 @@ verification.
 
 ## 5. Adversarial scenarios
 
-1. **Attacker controls the victim's Google account, then releases it.** They hold a secretary
-   session and a permanently Google-locked account. (F1)
+1. **Attacker controls the victim's Google account, then releases it.** *Closed.* They would hold a
+   secretary session and an account permanently locked to that identity — the finding that drove the
+   provider's removal. Nothing can present an external identity now. (F1, H6)
 2. **CSRF flood against a logged-in secretary.** Every request is rejected by the middleware; the
    refusal is now recorded against the secretary's own organization, so it is visible in their audit
    history. Note the residual limit: an unauthenticated flood has no organization and therefore no
@@ -300,7 +319,7 @@ verification.
 | Migration drift | Yes | — | — |
 | Allocation symmetry (H3) | `check_finances` only | — | Yes |
 | Session revocation on disable (H5) | **Yes** — `test_disable_account` | — | — |
-| Google account-linking (H6) | Partial | — | Yes |
+| External identity removal (H6) | **Yes** — `test_legacy_identity`, `test_migrations` | — | — |
 | Audit completeness (H7) | **Yes** — `test_observability` | — | — |
 | Signup send cap (H1) | **Yes** — `SignupSendCapTests` | — | — |
 | Production DEBUG guard (H13) | **Yes** — `test_production_config` | — | — |
@@ -327,17 +346,17 @@ repo (H18, H19).
    `ImproperlyConfigured` at import rather than only being caught by `check --deploy`.
 
 **Next — needs a decision from you**
-4. F1: see [`DESIGN-F1-GOOGLE-LINKING.md`](DESIGN-F1-GOOGLE-LINKING.md). The analysis, six options, a
-   recommendation (require an authenticated session to link when a usable password exists; allow
-   automatic linking when it does not), and the test plan are written up. **Not implemented**, because
-   whether Google-only accounts may be auto-linked is a product decision. Also undecided: there is no
-   way to unlink or replace a Google identity, which is what makes the lock-out permanent.
-5. H1: **the delegated cap-bypass finding was confirmed empirically and is now fixed** — 8 signup
-   POSTs against one unregistered address produced 8 emails despite a documented 5/hour cap, because
-   `create()` deleted the row holding `code_sends` (`signup.py:107-138`). Covered by
-   `SignupSendCapTests`. **Still open:** the Google login and callback routes have no per-source
-   throttle, and Axes is wired only to the password form. A source-based limit needs care so it
-   cannot be used to lock out legitimate users behind a shared NAT.
+4. F1: **RESOLVED by removal.** No decision needed — the provider is gone, so the silent
+   conversion it enabled is not reachable. Accounts it created are kept reachable by
+   `LegacyIdentity` (migration `0006_record_legacy_identities`), which only grants a reset to an
+   active, passwordless account and is spent on first use. See
+   [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md).
+5. H1: **confirmed empirically and fixed** — 8 signup POSTs against one unregistered address
+   produced 8 emails despite a documented 5/hour cap, because `create()` deleted the row holding
+   `code_sends`. The row is now updated rather than replaced, covered by `SignupSendCapTests`.
+   The provider's unthrottled routes were removed with F1, so nothing is left unthrottled. If a
+   provider is ever reintroduced, key any limit on something other than the bare source address so
+   it cannot be used to lock out legitimate users behind a shared NAT.
 6. F9: add a cron job to `render.yaml` for `cleanup_pending_signups` and a `clearsessions` run.
 7. F5: write a retention policy and a purge command that deliberately bypasses the append-only
    guards; assert the documented `REVOKE UPDATE, DELETE` in `deployment_check` so the blueprint
@@ -415,6 +434,39 @@ Re-verified after the behavioural-simulation round (F10, F11, F12, H2, H3), on 2
 | `manage.py test google_auth.tests.SignupDeliveryFailureTests` (new) | **6 tests, OK** |
 | `manage.py makemigrations --check --dry-run` | **No changes detected** |
 
+Re-verified after the external identity provider was removed, on 2026-10-01:
+
+| Command | Result |
+|---|---|
+| `manage.py test --noinput` (full suite) | **371 tests, OK, skipped=2** |
+| `manage.py test google_auth` | **53 tests, OK** |
+| `manage.py test google_auth.test_legacy_identity` (new) | **10 tests, OK** |
+| `manage.py test google_auth.test_migrations` (new) | **7 tests, OK** — both a fresh database with no provider table and a seeded pre-removal database driven through the real migration executor |
+| `manage.py makemigrations --check --dry-run` | **No changes detected** |
+
+Two bugs surfaced while removing the provider, both in shipped code rather than in the removal
+itself, and both now covered by regression tests:
+
+- **F13 — every completed password reset returned a 500.** `AuditablePasswordResetConfirmView.form_valid`
+  called `form.get_user()`, which `SetPasswordForm` does not have — the view binds the account as
+  `form.user`. The exception fired *after* `super().form_valid()` had already saved the new password,
+  so the user was shown an error page after their password had changed, and the
+  `auth.password_reset.completed` audit event was never written. Password recovery is the path used
+  when somebody cannot get into an account, so this failed at exactly the moment it mattered.
+  Fixed, and the same view no longer claims the account was signed in: `post_reset_login` is off, so
+  the organization is read from the account rather than the session.
+- **F14 — the removal migration would have crashed on any real database.**
+  `0006_record_legacy_identities` called `user.has_usable_password()` on a *historical* model from
+  `apps.get_model()`. Historical models carry their columns but none of `AbstractBaseUser`'s methods,
+  so the call raised `AttributeError` and took the deployment's `preDeployCommand` `migrate` with it —
+  on precisely the databases that had provider data to migrate. It now reads the password column and
+  applies `hashers.is_password_usable()`, the same test the method performs.
+
+Also fixed while testing the removal: a verification code hashed under one `PASSWORD_HASHERS`
+configuration could not be verified under another, because Django's `check_password` answers `False`
+for a hash made by an algorithm that is no longer configured. Not reachable in production, where
+settings do not change mid-flow, but it made the test helper lie about why a code was rejected.
+
 The suite is now fully green. The long-standing
 `test_member_report_uses_the_requested_month` failure (`AssertionError: 50 != 25`) turned out to be a
 bug in the test rather than the report, and was fixed: it asserted literal arrears figures of 25 and
@@ -454,7 +506,9 @@ where the HTML page had fallen into the catch-all branch.
 
 - No `X-Forwarded-For` trust was introduced, so no proxy-header configuration was exercised.
 - No rate-limit configuration was changed, so no tuning or load test applies.
-- Live Google OAuth was never exercised; all Google tests use `mocked_google`.
+- No email provider, external identity provider or third-party service was contacted. Every test
+  reads the code it needs from the in-memory mail backend, and there is now no identity provider
+  to exercise.
 - **Concurrency is unverified.** PostgreSQL 18 is running locally but every attempted credential
   failed authentication, and SQLite answered concurrent writes with `database table is locked`. No
   claim is made about behaviour under concurrent writers; F4 remains open and is the right place to

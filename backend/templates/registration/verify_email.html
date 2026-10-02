@@ -16,9 +16,7 @@
 {% else %}
 <p>We need to confirm that <strong>{{ email }}</strong> belongs to you before creating your organization.</p>{% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if sent %}<p class="small">We emailed you a 6-digit code. It expires in 10 minutes.</p>{% endif %}
-<form method="post" action="{% url 'google_verify' %}">{% csrf_token %}<button class="button primary" type="submit">Continue with Google</button>
-</form>
-<form method="post" id="verify-form">{% csrf_token %}<p class="small">Or verify with a code we email you.</p>{% if code_error %}<p class="error">{{ code_error }}</p>{% endif %}
+<form method="post" id="verify-form">{% csrf_token %}{% if code_error %}<p class="error">{{ code_error }}</p>{% endif %}
 <label>6-digit code<input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
 </label>
 <button class="button primary" type="submit" name="action" value="code">Verify email</button>

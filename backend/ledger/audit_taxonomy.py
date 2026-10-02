@@ -124,19 +124,12 @@ ACTIONS = {
     'auth.password.change_failed': Action('A password change was rejected', 'security', 'warning'),
     'auth.password_reset.completed': Action('A password was reset', 'security', 'warning'),
     'auth.recovery.requested': Action('A password reset was requested', 'security', 'warning'),
-    # --- Google sign-in and verification ------------------------------------
-    # Written by the google_auth app, but labelled here for the same reason every
+    # --- Signup verification --------------------------------------------------
+    # Written by the verification app, but labelled here for the same reason every
     # other action is: the words on screen and the strings in the database are
     # maintained in one place so they cannot disagree.
-    'google.login_success': Action('Signed in with Google', 'security', 'routine', 'User'),
-    'google.login_rejected': Action('A Google sign-in was refused', 'security', 'warning',
-                                    'User', 'A Google sign-in was refused'),
-    'google.account_linked': Action('Linked a Google account', 'security', 'notice', 'User',
-                                    'A Google account was linked'),
-    'google.no_tenant': Action('A Google event had no organization to file under',
-                               'security', 'warning', 'User'),
-    'google.callback_without_flow': Action('A Google response arrived with no sign-in in progress',
-                                          'security', 'warning'),
+    'auth.no_tenant': Action('An authentication event had no organization to file under',
+                             'security', 'warning', 'User'),
     'signup.email_verified': Action('Signed up after verifying their email address',
                                     'accounts', 'notice', 'User'),
     'signup.verification_rejected': Action('An email verification was refused', 'security',
@@ -146,7 +139,6 @@ ACTIONS = {
                                    'warning', 'User',
                                    'A verification code was not accepted'),
     'signup.rejected': Action('A sign-up attempt was refused', 'security', 'warning'),
-    'google.callback_rejected': Action('A Google response was refused', 'security', 'warning'),
     'security.account_locked': Action('An account was locked after repeated failed sign-ins', 'security', 'critical'),
     'security.csrf.failure': Action('A request was blocked for a missing or invalid security token', 'security', 'critical'),
     'access.denied': Action('Access was denied', 'security', 'critical'),
@@ -196,34 +188,14 @@ REASON_LABELS = {
     'read_only_role': 'The account is read-only and cannot make changes.',
     'preview_expired': 'The file review had expired. Upload the file again.',
     'duplicate_file': 'This file has already been imported.',
-    # --- Google --------------------------------------------------------------
-    # These are written by the google_auth app, which has its own longer reason
-    # strings for the technical log. The audit row keeps the short form so the
-    # column stays a stable, readable vocabulary, and these are the reader-facing
-    # sentences for it.
-    'no_active_membership': 'The account no longer has access to the organization.',
-    'no flow in session': 'The response did not belong to a sign-in this server started.',
+    # --- Signup verification --------------------------------------------------
+    # Written by the verification app, which has its own longer reason strings for
+    # the technical log. The audit row keeps the short form so the column stays a
+    # stable, readable vocabulary, and these are the reader-facing sentences for it.
     'code rejected': 'The emailed code was not accepted.',
-    'provider not configured': 'Google sign-in is not set up on this deployment.',
-    'no matching account': 'No account uses that email address.',
-    'ambiguous email': 'More than one account uses that email address.',
-    'no email claim': 'Google did not return an email address.',
-    'missing identity claim': 'Google did not return an account identifier.',
-    'unverified email': 'Google has not verified that email address.',
-    'unverified_email': 'Google has not verified that email address.',
-    'identity email mismatch': 'The Google account email did not match the linked account.',
-    'email already linked': 'That email address is already linked to another account.',
-    'different Google identity already linked': 'This account is linked to a different Google account.',
-    'identity already linked': 'That Google account is already linked to another account.',
     'account already exists': 'That email address is already in use here.',
-    'identity conflict': 'Two accounts tried to claim the same Google account at once.',
-    'session account mismatch': 'The signed-in account did not match the Google account.',
     'inactive account': 'The account has been disabled.',
-    'invalid login process': 'The sign-in could not be completed.',
-    'unknown flow': 'The sign-in flow could not be identified.',
     'no pending signup': 'There was no sign-up waiting to be verified.',
-    'signup already completed': 'That sign-up has already been completed.',
-    'oauth error': 'Google returned an error.',
 }
 
 # Used when the stored reason is one this release does not recognize. Never the

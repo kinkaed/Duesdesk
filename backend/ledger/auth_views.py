@@ -29,6 +29,10 @@ from .services import audit
 
 logger = logging.getLogger('ledger.auth')
 
+# Imported here rather than at module scope: ledger does not depend on the
+# verification app for anything else, and this keeps that one edge obvious.
+from google_auth.models import LegacyIdentity
+
 # Short, unsalted on purpose: this is a correlation handle inside an already
 # access-controlled table, not a credential store, and a salt per row would make
 # "show me every failure against this account" impossible.
@@ -55,13 +59,6 @@ def _locked_out(username, ip_address):
 
 
 class AuditableLoginView(auth.LoginView):
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        # Surfaces a Google round-trip refusal stored in the session by
-        # google_auth.login_error; the form, fields and layout are untouched.
-        context['google_login_error'] = self.request.session.pop('google_login_error', None)
-        return context
-
     def form_valid(self, form):
         response = super().form_valid(form)
         user = form.get_user()
@@ -122,11 +119,22 @@ class AuditablePasswordChangeView(auth.PasswordChangeView):
 
 class AuditablePasswordResetConfirmView(auth.PasswordResetConfirmView):
     def form_valid(self, form):
+        # SetPasswordForm has no get_user(): the view binds the account onto the
+        # form as .user. Reading form.get_user() instead raised AttributeError
+        # after the password had already been saved, so every completed reset
+        # answered 500 and never wrote its audit event.
+        user = form.user
         response = super().form_valid(form)
-        # Django signs the user in on this branch, so the account is known.
-        user = form.get_user()
+        # The account is not signed in here (post_reset_login is off), so the
+        # organization is read from the account itself rather than from the
+        # session, and the event still names the tenant it belongs to.
+        # An account that arrived with no password was allowed a reset link by
+        # LegacyIdentity. Now that it has one, the grant is spent: deleting the
+        # row means the account is an ordinary password account from here on, and
+        # a later reset is governed by Django's own rule again.
+        LegacyIdentity.objects.filter(user=user).delete()
         audit(user, 'auth.password_reset.completed', outcome='success',
-              organization=organization_for(user) if user and user.is_authenticated else None)
+              organization=organization_for(user))
         return response
 
     def form_invalid(self, form):

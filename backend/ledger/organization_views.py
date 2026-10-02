@@ -12,7 +12,7 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from django.core.validators import validate_email
 from .models import Organisation, UserAccess, SecretaryInvite
 from .access import organization_for, role_for
-from google_auth import flows as google_flows, signup as google_signup
+from google_auth import flows as signup_flows, signup as signup_steps
 
 logger = logging.getLogger(__name__)
 from .branding import DEFAULTS, branding_json, color, decode_logo, logo_token
@@ -75,11 +75,11 @@ def signup(request):
     if request.user.is_authenticated:return redirect('/')
     # "Wrong email, go back" on the verification page keeps the typed values,
     # except the password, which is never held anywhere.
-    kept=request.session.pop(google_flows.RETURN,None)
+    kept=request.session.pop(signup_flows.RETURN,None)
     # The invitation is taken from the link, and otherwise from the session,
     # which is how it survives a trip via the verification page. It is never
     # trusted from a posted field.
-    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(google_flows.INVITE,'') or ''
+    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(signup_flows.INVITE,'') or ''
     invite=valid_invite(token) if token else None
     if token and not invite:return render(request,'registration/invite_invalid.html',status=400)
     initial={}
@@ -88,7 +88,7 @@ def signup(request):
     form=SignupForm(request.POST or None,initial=initial or None)
     org_name=request.POST.get('organization_name','').strip() or (kept or {}).get('organization_name','')
     logo_token=(request.POST.get('logo_token')
-               or request.session.get(google_flows.LOGO,'') or (kept or {}).get('logo_token',''))
+               or request.session.get(signup_flows.LOGO,'') or (kept or {}).get('logo_token',''))
     form_valid = form.is_valid() if request.method == 'POST' else False
     if request.method == 'POST' and not form_valid and User.objects.filter(
             email__iexact=request.POST.get('email', '').strip()).exists():
@@ -118,20 +118,20 @@ def signup(request):
         except (ValueError,ValidationError) as error:
             form.add_error(None,str(error))
         else:
-            pending,problem=google_signup.create(request,form,org_name,invite_token=token,
+            pending,problem=signup_steps.create(request,form,org_name,invite_token=token,
                 palette=palette,logo_token=logo_token)
             if problem:form.add_error(None,problem)
             else:
                 # Nothing exists but a pending signup and the email we are about
                 # to send. Sign in happens here only after verification.
-                google_flows.begin_signup(request,pending.token)
+                signup_flows.begin_signup(request,pending.token)
                 # The pending signup keeps only the invitation's hash and the
                 # decoded logo, so both are held here to survive "wrong email,
                 # go back".
-                request.session[google_flows.INVITE]=token
-                request.session[google_flows.LOGO]=logo_token
-                problem=google_signup.send_code(request,pending)
-                if problem:request.session[google_flows.SIGNUP_ERROR]=problem
+                request.session[signup_flows.INVITE]=token
+                request.session[signup_flows.LOGO]=logo_token
+                problem=signup_steps.send_code(request,pending)
+                if problem:request.session[signup_flows.SIGNUP_ERROR]=problem
                 else:request.session['verify_code_sent']=True
                 return redirect('/signup/verify/')
     context={

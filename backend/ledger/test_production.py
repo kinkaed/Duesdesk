@@ -21,10 +21,10 @@ from .models import Member, UserAccess, Payment, AuditEvent, ImportBatch
 from .services import RATE, next_month, parse_month, record_payment, report_horizon, void_payment
 from .views import member_rows
 from . import views as ledger_views
-from google_auth.testsupport import GoogleTestMixin
+from google_auth.testsupport import SignupTestMixin
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend', STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
-class OperationalTests(GoogleTestMixin, TestCase):
+class OperationalTests(SignupTestMixin, TestCase):
     def setUp(self):
         self.org=Organisation.objects.create(name="Test Organization")
         self.secretary=User.objects.create_user('sec',password='A-Fresh-Strong-Password!',is_staff=True,email='sec@example.com')
@@ -50,7 +50,7 @@ class OperationalTests(GoogleTestMixin, TestCase):
         self.assertFalse(User.objects.filter(username='m1').exists())
         # Public signup only ever creates secretary access.
         visitor=Client()
-        response=self.signup_with_google({'username':'fresh','email':'fresh@example.com','password1':'Another-Strong-Phrase-42!','password2':'Another-Strong-Phrase-42!','organization_name':'Fresh Association'},client=visitor)
+        response=self.signup_with_code({'username':'fresh','email':'fresh@example.com','password1':'Another-Strong-Phrase-42!','password2':'Another-Strong-Phrase-42!','organization_name':'Fresh Association'},client=visitor)
         self.assertEqual(response.status_code,302,response.content[:300])
         self.assertEqual(User.objects.get(username='fresh').access.role,'secretary')
 

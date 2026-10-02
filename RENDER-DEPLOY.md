@@ -83,7 +83,6 @@ The blueprint declares fifteen. Which are secrets is decided in
 | `EMAIL_HOST` / `_USER` / `_PASSWORD` | prompt | yes² | SMTP |
 | `DEFAULT_FROM_EMAIL` | prompt | yes² | from address |
 | `EMAIL_PORT` / `EMAIL_USE_TLS` | no | no³ | not in the blueprint |
-| `GOOGLE_CLIENT_ID` / `_SECRET` | no | no⁴ | optional; see **GOOGLE-AUTH.md** |
 
 ¹ Satisfied automatically by Render's `RENDER_EXTERNAL_HOSTNAME`, which is
 always set for a web service. Set it explicitly anyway if you add a custom
@@ -100,12 +99,6 @@ that `deployment_check` only verifies that `EMAIL_HOST` is set and
 `DEFAULT_FROM_EMAIL` is not localhost — it does not test the port or a
 handshake, so a wrong port passes the deploy gate and only fails on the first
 real email.
-
-⁴ Not declared in the blueprint as committed, so set them directly on the
-service, or add them to `render.yaml` if you would rather the Blueprint prompt
-for them. Google sign-in is optional and fails closed, so leaving both unset
-is a valid configuration: the Google URLs refuse with an explanation and the
-emailed code still works.
 
 ### The proxy warning
 

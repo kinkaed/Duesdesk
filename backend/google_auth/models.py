@@ -24,7 +24,6 @@ CODE_LIFETIME = 10 * 60                  # 10 minutes
 CODE_ATTEMPTS = 5                        # then the code is dead, request a new one
 RESEND_COOLDOWN = 60                     # seconds between sends
 SENDS_PER_HOUR = 5
-GOOGLE = 'google'
 CODE = 'code'
 
 
@@ -111,7 +110,7 @@ class PendingSignup(models.Model):
         return len([t for t in stamps if now - t < timedelta(hours=1)]) < SENDS_PER_HOUR
 
 
-class GoogleAuthRejection(models.Model):
+class AuthRejection(models.Model):
     """A refused verification or sign-in that no organization can own.
 
     ``ledger.AuditEvent`` requires an organization, and a rejected attempt by
@@ -122,20 +121,18 @@ class GoogleAuthRejection(models.Model):
 
     ``flow`` says which entry point the browser had started, so a refusal to
     verify a signup address is never confused with a refusal to sign in.
-    ``method`` says how a signup address was being proven: 'google' or 'code'.
+    ``method`` says how a signup address was being proven.
 
     Rows hold the address involved, which is attacker-influenceable and may
     belong to a person who has no account here. Treat the table as confidential
     operational data.
     """
 
-    provider = models.CharField(max_length=32, default='google')
     action = models.CharField(max_length=60)
     reason = models.CharField(max_length=60)
     flow = models.CharField(max_length=16, blank=True, default='')
     method = models.CharField(max_length=8, blank=True, default='')
-    # The address presented by Google, or the address being verified; blank when
-    # the claim was missing or unusable.
+    # The address being verified; blank when the attempt was unusable.
     email = models.CharField(max_length=254, blank=True, default='')
     # Populated only when the attempt resolved to an account this server owns.
     user = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True,
@@ -146,4 +143,40 @@ class GoogleAuthRejection(models.Model):
 
     class Meta:
         ordering = ['-id']
-        verbose_name = 'Google sign-in rejection'
+        verbose_name = 'Authentication rejection'
+
+
+class LegacyIdentity(models.Model):
+    """An account that arrived through an external provider and owes a password.
+
+    Duesdesk no longer authenticates against any external provider. Accounts that
+    were created by one never had a usable password, and Django's password reset
+    refuses to serve exactly those accounts -- by design, since an address that
+    was never proven to *this* server must not be able to claim the account.
+
+    When the external provider was removed, the identity table said which
+    addresses had been proven there, and the migration recorded one row per such
+    account here. That row is the evidence that the address was verified while
+    the provider existed, and it is what lets the reset form offer a password to
+    an account that otherwise has none.
+
+    This grants nothing by itself. The user still has to prove control of the
+    mailbox, and the flag is cleared the moment they do, so the grant is spent
+    once. Nothing else in the application reads this table.
+    """
+
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name='legacy_identity')
+    # The provider that created the account, kept only as provenance for whoever
+    # is auditing the removal. It is a historical string, not a live integration.
+    provider = models.CharField(max_length=32)
+    # The address that provider verified, kept as evidence alongside the flag.
+    email = models.CharField(max_length=254, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+        verbose_name = 'Legacy identity'
+
+    def __str__(self):
+        return f'LegacyIdentity {self.user_id} via {self.provider}'

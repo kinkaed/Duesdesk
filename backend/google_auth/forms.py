@@ -2,8 +2,8 @@
 from django.contrib.auth.forms import AuthenticationForm, PasswordResetForm
 from django.contrib.auth import get_user_model
 from axes.handlers.proxy import AxesProxyHandler
-from allauth.account.models import EmailAddress
-from allauth.socialaccount.models import SocialAccount
+
+from .models import LegacyIdentity
 
 
 class GuardedAuthenticationForm(AuthenticationForm):
@@ -16,17 +16,29 @@ class GuardedAuthenticationForm(AuthenticationForm):
         return super().clean()
 
 
-class GooglePasswordResetForm(PasswordResetForm):
+class AccountRecoveryForm(PasswordResetForm):
+    """Password reset, extended for accounts that arrived with no password.
+
+    Django deliberately refuses to send a reset link to an account with an
+    unusable password: if this server never proved that address, an emailed link
+    must not be able to claim it. That rule is kept.
+
+    The exception is an account the external provider created and the removal
+    migration recorded in ``LegacyIdentity``. The address was proven while that
+    provider existed, and without this those people could never sign in at all.
+    The grant is spent once: the row is deleted when the password is set.
+    """
+
     def get_users(self, email):
-        # Preserve Django's usual eligibility, adding only verified Google users
-        # with unusable passwords. Never verify an unrelated contact address.
         seen = set()
         for user in super().get_users(email):
             seen.add(user.pk)
             yield user
-        for user in get_user_model().objects.filter(email__iexact=email, is_active=True):
-            if user.pk in seen or user.has_usable_password():
+        candidates = (get_user_model().objects
+                      .filter(email__iexact=email, is_active=True)
+                      .exclude(pk__in=seen))
+        for user in candidates:
+            if user.has_usable_password():
                 continue
-            if (EmailAddress.objects.filter(user=user, email__iexact=user.email, verified=True).exists()
-                    and SocialAccount.objects.filter(user=user, provider='google', extra_data__email__iexact=user.email).exists()):
+            if LegacyIdentity.objects.filter(user=user).exists():
                 yield user

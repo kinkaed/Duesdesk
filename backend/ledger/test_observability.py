@@ -38,8 +38,8 @@ from .audit_taxonomy import (
 )
 from .auth_views import username_fingerprint
 from .models import AuditEvent, Member, Organisation, UserAccess
-from google_auth.audit import record as google_record
-from google_auth.models import GoogleAuthRejection
+from google_auth.audit import record as auth_record
+from google_auth.models import AuthRejection
 from .observability import (
     ANONYMOUS_ACTIONS,
     RequestContext,
@@ -604,68 +604,65 @@ class AuthAuditTests(TestCase):
         logged = ' '.join(str(call) for call in logger.log.call_args_list)
         self.assertNotIn('My-Secret-Attempt-99', logged)
 
-    def test_the_google_refusal_of_a_known_account_is_recorded_for_the_tenant(self):
+    def test_the_refusal_of_a_known_account_is_recorded_for_the_tenant(self):
         # The google_auth app records through this helper, so its refusals are
         # held to the same standard: correlated, addressed, and explained in
-        # words. A member whose Google sign-in is refused is a security event the
+        # words. A member whose sign-in is refused is a security event the
         # organization's own secretary should be able to read.
         with patch('ledger.services.current_context',
-                   return_value=RequestContext('req-google', 'GET', '/accounts/google/login/callback/',
+                   return_value=RequestContext('req-refused', 'GET', '/login/',
                                                ip_address='192.0.2.9', user_agent='Mozilla/5.0')):
-            google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
-                          user=self.secretary, reason='inactive account', email='s@example.com',
-                          flow='login', method='google')
-        event = AuditEvent.objects.get(action='google.login_rejected')
+            auth_record(request_with_remote_addr('192.0.2.9'), 'auth.login.failure',
+                        user=self.secretary, reason='wrong password', email='s@example.com',
+                        flow='login', method='password')
+        event = AuditEvent.objects.get(action='auth.login.failure')
         self.assertEqual(event.organization, self.org)
         self.assertEqual(event.actor, self.secretary)
         self.assertEqual(event.outcome, 'rejected')
-        self.assertEqual(event.reason, 'inactive account')
+        self.assertEqual(event.reason, 'wrong password')
         self.assertEqual(event.entity, 'User')
         self.assertEqual(event.entity_id, str(self.secretary.pk))
-        self.assertEqual(event.request_id, 'req-google')
+        self.assertEqual(event.request_id, 'req-refused')
         self.assertEqual(event.ip_address, '192.0.2.9')
-        self.assertEqual(event.path, '/accounts/google/login/callback/')
+        self.assertEqual(event.path, '/login/')
         self.assertEqual(event.user_agent, 'Mozilla/5.0')
-        # The provider and the flow are the only extras; the address lives in a
+        # The flow and the method are the only extras; the address lives in a
         # column and the time in created_at, so neither is repeated here.
         details = json.loads(event.details)
-        self.assertEqual(details, {'provider': 'google', 'method': 'google',
+        self.assertEqual(details, {'method': 'password',
                                    'flow': 'login', 'email': 's@example.com'})
         # And it reads as a sentence, without a screen knowing the identifier.
         described = describe(event.action, event.outcome, 'secretary')
-        self.assertEqual(described['label'], 'A Google sign-in was refused')
         self.assertEqual(described['category'], 'security')
-        self.assertEqual(reason_label(event.reason, event.outcome),
-                         'The account has been disabled.')
 
-    def test_a_google_refusal_with_no_account_is_never_filed_under_a_tenant(self):
+    def test_a_refusal_with_no_account_is_never_filed_under_a_tenant(self):
         # An address that matches nothing has no organization, and inventing one
         # would drop a stranger's failed sign-in into somebody else's history. It
         # is recorded in the tenantless rejection table instead, and the audit
         # helper is never called with a row nobody could read.
-        google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
-                      reason='no matching account', email='stranger@example.com',
-                      flow='login', method='google')
+        auth_record(request_with_remote_addr('192.0.2.9'), 'auth.login.failure',
+                    reason='no matching account', email='stranger@example.com',
+                    flow='login', method='password')
 
-        rejection = GoogleAuthRejection.objects.get()
-        self.assertEqual(rejection.action, 'google.login_rejected')
+        rejection = AuthRejection.objects.get()
+        self.assertEqual(rejection.action, 'auth.login.failure')
         self.assertEqual(rejection.reason, 'no matching account')
         self.assertEqual(rejection.email, 'stranger@example.com')
         self.assertIsNone(rejection.user_id)
-        self.assertFalse(AuditEvent.objects.filter(action='google.login_rejected').exists())
+        self.assertFalse(AuditEvent.objects.filter(action='auth.login.failure').exists())
 
-    def test_a_google_refusal_survives_a_failing_database(self):
+    def test_a_refusal_survives_a_failing_database(self):
         # Same contract as every other audit call site: a sign-in refusal must
         # still be a sign-in refusal if the audit write fails.
-        with patch('google_auth.audit.GoogleAuthRejection.objects.create',
+        with patch('google_auth.audit.AuthRejection.objects.create',
                    side_effect=OperationalError('audit unavailable')):
-            google_record(request_with_remote_addr('192.0.2.9'), 'google.login_rejected',
-                          user=self.secretary, reason='inactive account',
-                          email='s@example.com', flow='login', method='google')
+            auth_record(request_with_remote_addr('192.0.2.9'), 'auth.login.failure',
+                        user=self.secretary, reason='inactive account',
+                        email='s@example.com', flow='login', method='password')
         # The refusal is not recorded anywhere, but the request is not turned
         # into a 500 either, and the second write still happens.
-        self.assertFalse(GoogleAuthRejection.objects.exists())
-        self.assertTrue(AuditEvent.objects.filter(action='google.login_rejected').exists())
+        self.assertFalse(AuthRejection.objects.exists())
+        self.assertTrue(AuditEvent.objects.filter(action='auth.login.failure').exists())
 
     def test_an_unknown_username_and_a_wrong_password_are_recorded_identically(self):
         # Any difference here would tell an attacker which accounts are real.
