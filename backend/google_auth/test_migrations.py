@@ -15,8 +15,9 @@ The cases that matter:
 * rolling back removes only the marks, leaving the provider's table intact.
 """
 from django.contrib.auth import get_user_model
-from django.db import connection
+from django.db import connection, models
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
 from django.test import TransactionTestCase
 
 from .models import LegacyIdentity
@@ -25,17 +26,28 @@ SOURCE_TABLE = 'socialaccount_socialaccount'
 BEFORE = [('google_auth', '0004_pendingsignup_verified_at')]
 AFTER = [('google_auth', '0006_record_legacy_identities')]
 
-# The columns the migration reads, and nothing else. The provider package is no
-# longer installed, so this table is recreated here exactly as it was left.
-CREATE_SOURCE = """
-    CREATE TABLE socialaccount_socialaccount (
-        id integer NOT NULL PRIMARY KEY AUTOINCREMENT,
-        user_id integer NULL,
-        provider varchar(32) NOT NULL,
-        uid varchar(255) NOT NULL,
-        extra_data text NULL
-    )
-"""
+
+class ProviderIdentity(models.Model):
+    """A stand-in for the provider's identity table, with the columns the
+    migration reads and nothing else.
+
+    The package that owned the real table is no longer installed, so the test has
+    to put it back. It is declared as a model rather than written as SQL so the
+    table is created the way the database in front of us expects one: hand-written
+    DDL is where a SQLite test quietly stops being a PostgreSQL test.
+    """
+
+    # The provider's own table had a foreign key here. This one does not: the
+    # migration only ever reads the number, and a stand-in that carries no
+    # constraint cannot pass for the wrong reason.
+    user = models.IntegerField(null=True, db_column='user_id')
+    provider = models.CharField(max_length=32)
+    uid = models.CharField(max_length=255)
+    extra_data = models.TextField(null=True)
+
+    class Meta:
+        db_table = SOURCE_TABLE
+        app_label = 'google_auth'
 
 
 class ProviderTableMixin:
@@ -44,20 +56,29 @@ class ProviderTableMixin:
         executor.loader.build_graph()
         return executor.migrate(target)
 
+    def migrate_to_latest(self):
+        """Restore every google_auth migration, not just the one under test."""
+        loader = MigrationLoader(connection)
+        return self.migrate_to(loader.graph.leaf_nodes('google_auth'))
+
     def drop_provider_table(self):
         # The table is created by hand here, so Django's flush has no reason to
-        # know about it and it would otherwise survive into the next test.
-        with connection.cursor() as cursor:
-            cursor.execute('DROP TABLE IF EXISTS ' + SOURCE_TABLE)
+        # know about it and it would otherwise survive into the next test. It is
+        # often not there at all: the first test to run finds no trace of it.
+        if SOURCE_TABLE not in connection.introspection.table_names():
+            return
+        with connection.schema_editor() as editor:
+            editor.delete_model(ProviderIdentity)
 
     def put_provider_rows(self, *rows):
         """Recreate the provider's table and fill it with (user, provider, extra_data)."""
         self.drop_provider_table()
+        with connection.schema_editor() as editor:
+            editor.create_model(ProviderIdentity)
         with connection.cursor() as cursor:
-            cursor.execute(CREATE_SOURCE)
             for user, provider, extra_data in rows:
                 cursor.execute(
-                    'INSERT INTO socialaccount_socialaccount '
+                    'INSERT INTO ' + SOURCE_TABLE + ' '
                     '(user_id, provider, uid, extra_data) VALUES (%s, %s, %s, %s)',
                     [user.pk, provider, 'uid-%s' % user.pk, extra_data])
 
@@ -103,11 +124,13 @@ class ExistingDatabaseTests(ProviderTableMixin, TransactionTestCase):
         self.migrate_to(BEFORE)
 
     def tearDown(self):
-        # The evidence goes first, so re-running the forward migration for the
-        # next test finds no provider table and does nothing.
+        # The schema goes back first and whatever the test did. Restoring it is
+        # what the rest of the suite depends on, and a half-migrated database
+        # breaks every test after this one rather than this one alone.
+        self.migrate_to_latest()
+        # The evidence goes last, so the next test starts from a database that
+        # never had the provider.
         self.drop_provider_table()
-        self.migrate_to(BEFORE)
-        self.migrate_to(AFTER)
 
     def test_only_the_provider_accounts_are_marked(self):
         User = get_user_model()
