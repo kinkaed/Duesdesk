@@ -13,6 +13,7 @@ Your main React source is **work.tsx**. This is a browser application, not React
 | `backend/ledger/models.py` | Relational database schema |
 | `backend/ledger/services.py` | Payment allocation, corrections, audit records |
 | `backend/ledger/views.py` | Authenticated APIs, reports, imports and recovery |
+| `backend/serve.py` | Waitress server and proxy-header trust |
 | `backend/config/settings.py` | Local and production configuration |
 
 ## Use on this computer
@@ -43,8 +44,9 @@ Optional Vite development server: start the Django server first, then run `pnpm 
 - Reviewed CSV imports for members/payments, duplicate-file prevention and transactional commits.
 - CSV and Excel exports for monthly balances and payment ledgers.
 - Audit history, CSRF protection, security headers, secure production cookies and encrypted SQL connections.
+- The address in an audit record is the peer the server actually reached. The app never trusts `X-Forwarded-For` from an unverified proxy (Render appends to it, so a client could set its first value); behind a proxy it records the proxy's address and the page says so. `deployment_check` fails the deploy on any configuration that would make the address client-forgeable.
 
-Read **USER-GUIDE.md** for workflows and **DEPLOYMENT.md** for online hosting, backups and go-live requirements.
+Read **USER-GUIDE.md** for workflows and **DEPLOYMENT.md** for online hosting, backups and go-live requirements. For the step-by-step Render deployment and the procedure for updating the running service, read **RENDER-DEPLOY.md**.
 
 ## Checks
 

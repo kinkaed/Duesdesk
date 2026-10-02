@@ -12,13 +12,13 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from django.core.validators import validate_email
 from .models import Organisation, UserAccess, SecretaryInvite
 from .access import organization_for, role_for
-from google_auth import flows as google_flows, signup as google_signup
+from google_auth import flows as signup_flows, signup as signup_steps
 
 logger = logging.getLogger(__name__)
 from .branding import DEFAULTS, branding_json, color, decode_logo, logo_token
 from .forms import SignupForm
 from .services import audit
-from .views import api, body
+from .views import api, body, READ_ONLY
 
 
 def token_hash(raw):
@@ -40,7 +40,7 @@ def preview_owner(request):
 @require_POST
 def logo_preview(request):
     if request.user.is_authenticated and role_for(request.user) != 'secretary':
-        return HttpResponse(status=403)
+        return JsonResponse({'error': READ_ONLY}, status=403)
     try:
         raw, palette = decode_logo(request.FILES.get('logo'))
         return JsonResponse({'logo_token':logo_token(raw,preview_owner(request)), **palette})
@@ -57,16 +57,29 @@ def logo(request, public_id):
     return response
 
 
+# The theme preview on the sign-up page needs rows to draw. They are invented here
+# rather than queried, which is the point: a preview must never read a real
+# member, and a preview that did would leak one to somebody signing up. The badge
+# classes match the statuses the application renders, so the preview shows what
+# the real table will look like.
+PREVIEW_MEMBERS=(
+    {'name':'Ama Mensah','code':'MBR-0001','status':'paid','status_label':'Paid','arrears':'—'},
+    {'name':'Kwame Boateng','code':'MBR-0002','status':'partial','status_label':'Partial','arrears':'GH₵ 50'},
+    {'name':'Akosua Owusu','code':'MBR-0003','status':'unpaid','status_label':'Unpaid','arrears':'GH₵ 175'},
+    {'name':'Kofi Asante','code':'MBR-0004','status':'not-due','status_label':'Not due','arrears':'GH₵ 25'},
+)
+
+
 @require_http_methods(['GET','POST'])
 def signup(request):
     if request.user.is_authenticated:return redirect('/')
     # "Wrong email, go back" on the verification page keeps the typed values,
     # except the password, which is never held anywhere.
-    kept=request.session.pop(google_flows.RETURN,None)
+    kept=request.session.pop(signup_flows.RETURN,None)
     # The invitation is taken from the link, and otherwise from the session,
     # which is how it survives a trip via the verification page. It is never
     # trusted from a posted field.
-    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(google_flows.INVITE,'') or ''
+    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(signup_flows.INVITE,'') or ''
     invite=valid_invite(token) if token else None
     if token and not invite:return render(request,'registration/invite_invalid.html',status=400)
     initial={}
@@ -75,12 +88,12 @@ def signup(request):
     form=SignupForm(request.POST or None,initial=initial or None)
     org_name=request.POST.get('organization_name','').strip() or (kept or {}).get('organization_name','')
     logo_token=(request.POST.get('logo_token')
-               or request.session.get(google_flows.LOGO,'') or (kept or {}).get('logo_token',''))
+               or request.session.get(signup_flows.LOGO,'') or (kept or {}).get('logo_token',''))
     form_valid = form.is_valid() if request.method == 'POST' else False
     if request.method == 'POST' and not form_valid and User.objects.filter(
             email__iexact=request.POST.get('email', '').strip()).exists():
         from google_auth.audit import record
-        record(request, 'signup_rejected', reason='account already exists',
+        record(request, 'signup.rejected', reason='account already exists',
                email=request.POST.get('email', '').strip().lower(), flow='signup')
     if request.method=='POST' and form_valid:
         # Validate exactly as before, then create nothing. The user, the
@@ -105,26 +118,27 @@ def signup(request):
         except (ValueError,ValidationError) as error:
             form.add_error(None,str(error))
         else:
-            pending,problem=google_signup.create(request,form,org_name,invite_token=token,
+            pending,problem=signup_steps.create(request,form,org_name,invite_token=token,
                 palette=palette,logo_token=logo_token)
             if problem:form.add_error(None,problem)
             else:
                 # Nothing exists but a pending signup and the email we are about
                 # to send. Sign in happens here only after verification.
-                google_flows.begin_signup(request,pending.token)
+                signup_flows.begin_signup(request,pending.token)
                 # The pending signup keeps only the invitation's hash and the
                 # decoded logo, so both are held here to survive "wrong email,
                 # go back".
-                request.session[google_flows.INVITE]=token
-                request.session[google_flows.LOGO]=logo_token
-                problem=google_signup.send_code(request,pending)
-                if problem:request.session[google_flows.SIGNUP_ERROR]=problem
+                request.session[signup_flows.INVITE]=token
+                request.session[signup_flows.LOGO]=logo_token
+                problem=signup_steps.send_code(request,pending)
+                if problem:request.session[signup_flows.SIGNUP_ERROR]=problem
                 else:request.session['verify_code_sent']=True
                 return redirect('/signup/verify/')
     context={
         'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
         'palette':{k:request.POST.get(k,(kept or {}).get('palette',{}).get(k,v)) for k,v in DEFAULTS.items()},
-        'logo_token':logo_token}
+        'logo_token':logo_token,
+        'preview_members':PREVIEW_MEMBERS}
     # An invitation brings its organization with it, so the card is shown in that
     # organization's colors and logo.
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))
@@ -134,7 +148,7 @@ def signup(request):
 @api
 @require_http_methods(['GET','POST'])
 def invites(request):
-    if role_for(request.user)!='secretary':return HttpResponse(status=403)
+    if role_for(request.user)!='secretary':return JsonResponse({'error': READ_ONLY},status=403)
     org=organization_for(request.user)
     if request.method=='GET':
         rows=SecretaryInvite.objects.filter(organization=org).order_by('-id')[:100]
@@ -154,6 +168,12 @@ def invites(request):
 def revoke_invite(request,pk):
     item=get_object_or_404(SecretaryInvite,pk=pk,organization=organization_for(request.user))
     if item.used_at:raise ValueError('This invitation has already been used.')
+    # Idempotent, like disable_account and enable_account next door. Revoking
+    # twice used to write a second invite.revoked row and stamp a second
+    # revoked_at on the same invite, so a double click on Revoke manufactured
+    # duplicate history: an auditor reading the trail would see the invitation
+    # cancelled by two separate decisions when only one was ever made.
+    if item.revoked_at:return JsonResponse({'ok':True,'already_revoked':True})
     item.revoked_at=timezone.now();item.save(update_fields=['revoked_at'])
     audit(request.user,'invite.revoked',item)
     return JsonResponse({'ok':True})

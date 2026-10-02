@@ -1,4 +1,5 @@
 from io import StringIO
+import json
 import uuid
 
 from django.contrib.auth.models import User
@@ -8,15 +9,15 @@ from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from .models import AuditEvent, Member, Organisation, Payment, UserAccess, Allocation, DuesMonth
-from google_auth.testsupport import GoogleTestMixin
+from google_auth.testsupport import SignupTestMixin
 
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'], STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}})
-class DisableAccountTests(GoogleTestMixin, TestCase):
+class DisableAccountTests(SignupTestMixin, TestCase):
     def setUp(self):
         self.password='A-Very-Strong-Private-Phrase-42!'
         self.client=Client()
-        self.signup_with_google({'username':'founder','email':'founder@example.com','password1':self.password,'password2':self.password,'organization_name':'Disable Co'},client=self.client)
+        self.signup_with_code({'username':'founder','email':'founder@example.com','password1':self.password,'password2':self.password,'organization_name':'Disable Co'},client=self.client)
         self.org=Organisation.objects.get(name='Disable Co')
         self.founder=User.objects.get(username='founder')
         self.target=User.objects.create_user('colleague',email='colleague@example.com',password=self.password)
@@ -65,6 +66,89 @@ class DisableAccountTests(GoogleTestMixin, TestCase):
         # Login is refused outright, so there is no session to reach any data with.
         self.assertEqual(fresh.get('/api/members/').status_code,401)
         self.assertEqual(fresh.get('/api/overview/').status_code,401)
+
+    # Clearing is_active stops a new sign-in. It does not end a sign-in that has
+    # already happened: the session rows outlive the flag. These assert the
+    # behaviour an attacker or a locked-out user would actually observe, not the
+    # presence or absence of a database row.
+
+    def signed_in_session(self):
+        """A client holding a genuinely authenticated session for the target."""
+        client=self.sign_in('colleague')
+        self.assertEqual(client.get('/api/members/').status_code,200)
+        return client
+
+    def test_disable_ends_a_session_that_was_already_signed_in(self):
+        session=self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # The old cookie is presented again and must no longer authenticate.
+        self.assertEqual(session.get('/api/members/').status_code,401)
+        self.assertEqual(session.get('/api/overview/').status_code,401)
+
+    def test_re_enabling_does_not_revive_the_old_session(self):
+        session=self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.enable(self.target).status_code,200)
+        self.target.refresh_from_db()
+        self.assertTrue(self.target.is_active)
+        # The account is usable again, but not through the cookie it had before.
+        # Without this the disable would be cosmetic.
+        self.assertEqual(session.get('/api/members/').status_code,401)
+
+    def test_fresh_sign_in_works_after_re_enabling(self):
+        self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.enable(self.target).status_code,200)
+        fresh=self.sign_in('colleague')
+        self.assertEqual(fresh.get('/api/members/').status_code,200)
+
+    def test_disable_revokes_every_session_not_just_the_first(self):
+        # One row per browser, so a user signed in on a phone and a laptop holds
+        # two. Only deleting the newest would leave the other working.
+        phone=self.sign_in('colleague')
+        laptop=self.sign_in('colleague')
+        desktop=self.sign_in('colleague')
+        for client in (phone,laptop,desktop):
+            self.assertEqual(client.get('/api/members/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        for client in (phone,laptop,desktop):
+            self.assertEqual(client.get('/api/members/').status_code,401)
+
+    def test_disable_leaves_other_accounts_signed_in(self):
+        other=User.objects.create_user('auditor',email='auditor@example.com',password=self.password)
+        UserAccess.objects.create(organization=self.org,user=other,role='auditor')
+        colleague=self.signed_in_session()
+        bystander=self.sign_in('auditor')
+        self.assertEqual(bystander.get('/api/members/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # Revocation is scoped to the account that was disabled.
+        self.assertEqual(colleague.get('/api/members/').status_code,401)
+        self.assertEqual(bystander.get('/api/members/').status_code,200)
+
+    def test_disable_records_how_many_sessions_were_ended(self):
+        self.signed_in_session()
+        self.sign_in('colleague')
+        self.assertEqual(self.disable(self.target).status_code,200)
+        details=json.loads(AuditEvent.objects.filter(action='account.disabled',entity_id=str(self.target.pk)).get().details)
+        self.assertEqual(details['sessions_revoked'],2)
+
+    def test_disable_while_signed_in_does_not_break_the_acting_session(self):
+        # A secretary disables a colleague from their own browser. Only the
+        # target's sessions may be touched, or the person performing a routine
+        # administrative action would be signed out by doing it.
+        self.signed_in_session()
+        self.assertEqual(self.client.get('/api/overview/').status_code,200)
+        self.assertEqual(self.disable(self.target).status_code,200)
+        self.assertEqual(self.client.get('/api/overview/').status_code,200)
+        self.assertEqual(self.client.get('/api/accounts/').status_code,200)
+
+    def test_already_disabled_account_is_left_alone(self):
+        self.signed_in_session()
+        self.assertEqual(self.disable(self.target).status_code,200)
+        # A repeat press must not report a second revocation: the sessions are
+        # already gone and the count would be misleading.
+        details=json.loads(AuditEvent.objects.filter(action='account.disabled',entity_id=str(self.target.pk)).get().details)
+        self.assertEqual(details['sessions_revoked'],1)
 
     def test_history_survives_disable(self):
         payment=self.record_payment()
@@ -128,8 +212,84 @@ class DisableAccountTests(GoogleTestMixin, TestCase):
         self.assertTrue(UserAccess.objects.get(user=self.target).active)
         self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)
 
+    # Enabling is the counterpart to disabling above. It exists so a secretary can
+    # undo a mistake from the product instead of needing a server shell.
 
-class DisableUnderUserMemberConstraintTests(GoogleTestMixin, TransactionTestCase):
+    def enable(self,user):
+        return self.post(f'/api/accounts/{user.pk}/enable/')
+
+    def test_enable_restores_a_disabled_account(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        restored=self.enable(self.target)
+        self.assertEqual(restored.status_code,200)
+        self.assertEqual(restored.json()['already_enabled'],False)
+        self.target.refresh_from_db()
+        self.access.refresh_from_db()
+        self.assertTrue(self.access.active)
+        self.assertTrue(self.target.is_active)
+        # The account is genuinely usable again, not just flagged in the database.
+        self.assertEqual(self.sign_in('colleague').get('/api/members/').status_code,200)
+        self.assertTrue(AuditEvent.objects.filter(action='account.enabled',entity_id=str(self.target.pk)).exists())
+
+    def test_enable_is_idempotent_on_repeat(self):
+        self.assertEqual(self.disable(self.target).status_code,200)
+        first=self.enable(self.target)
+        self.assertEqual(first.status_code,200)
+        self.assertEqual(first.json()['already_enabled'],False)
+        second=self.enable(self.target)
+        self.assertEqual(second.status_code,200)
+        self.assertEqual(second.json()['already_enabled'],True)
+        self.assertEqual(AuditEvent.objects.filter(action='account.enabled',entity_id=str(self.target.pk)).count(),1)
+
+    def test_enable_never_changes_the_role(self):
+        # Enabling restores access only. It must not be a way to promote an
+        # account, so an auditor comes back as an auditor.
+        auditor=User.objects.create_user('restored',email='restored@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=self.org,user=auditor,role='auditor')
+        self.assertEqual(self.disable(auditor).status_code,200)
+        self.assertEqual(self.enable(auditor).status_code,200)
+        access.refresh_from_db()
+        self.assertTrue(access.active)
+        self.assertEqual(access.role,'auditor')
+        self.assertFalse(auditor.__class__.objects.get(pk=auditor.pk).is_superuser)
+        self.assertEqual(json.loads(AuditEvent.objects.filter(action='account.enabled',entity_id=str(auditor.pk)).first().details)['role'],'auditor')
+
+    def test_cannot_enable_across_organizations(self):
+        other=Organisation.objects.create(name='Other Co')
+        stranger=User.objects.create_user('stranger',email='stranger@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=other,user=stranger,role='secretary')
+        access.active=False;access.save(update_fields=['active'])
+        self.assertEqual(self.enable(stranger).status_code,404)
+        self.assertFalse(UserAccess.objects.get(user=stranger).active)
+
+    def test_auditor_cannot_enable(self):
+        auditor=User.objects.create_user('auditor',email='auditor@example.com',password=self.password)
+        UserAccess.objects.create(organization=self.org,user=auditor,role='auditor')
+        target=User.objects.create_user('target',email='target@example.com',password=self.password)
+        access=UserAccess.objects.create(organization=self.org,user=target,role='auditor')
+        access.active=False;access.save(update_fields=['active'])
+        target.is_active=False;target.save(update_fields=['is_active'])
+        self.client.force_login(auditor)
+        response=self.enable(target)
+        self.assertEqual(response.status_code,403)
+        self.assertFalse(UserAccess.objects.get(user=target).active)
+        self.assertFalse(User.objects.get(pk=target.pk).is_active)
+
+    def test_non_superuser_cannot_enable_a_superuser(self):
+        root=User.objects.create_user('root',email='root@example.com',password=self.password,is_superuser=True)
+        access=UserAccess.objects.create(organization=self.org,user=root,role='secretary')
+        # Reached without going through disable, which refuses a superuser target
+        # outright, so the stored state is set directly to model the legacy case.
+        access.active=False;access.save(update_fields=['active'])
+        root.is_active=False;root.save(update_fields=['is_active'])
+        response=self.enable(root)
+        self.assertEqual(response.status_code,400)
+        self.assertIn('superuser',response.json()['error'])
+        self.assertFalse(UserAccess.objects.get(user=root).active)
+        self.assertFalse(User.objects.get(pk=root.pk).is_active)
+
+
+class DisableUnderUserMemberConstraintTests(SignupTestMixin, TransactionTestCase):
     """Runs outside a wrapping transaction so it can add and drop a real index."""
 
     reset_sequences = False
@@ -137,7 +297,7 @@ class DisableUnderUserMemberConstraintTests(GoogleTestMixin, TransactionTestCase
     def setUp(self):
         self.password = 'A-Very-Strong-Private-Phrase-42!'
         self.client = Client()
-        self.signup_with_google({'username': 'founder', 'email': 'founder@example.com', 'password1': self.password, 'password2': self.password, 'organization_name': 'Constraint Co'},client=self.client)
+        self.signup_with_code({'username': 'founder', 'email': 'founder@example.com', 'password1': self.password, 'password2': self.password, 'organization_name': 'Constraint Co'},client=self.client)
         self.org = Organisation.objects.get(name='Constraint Co')
         self.founder = User.objects.get(username='founder')
         self.target = User.objects.create_user('colleague', email='colleague@example.com', password=self.password)

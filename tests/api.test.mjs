@@ -1,6 +1,6 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { api } from '../api.ts';
+import { api, signOut } from '../api.ts';
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; delete globalThis.document; delete globalThis.location; });
 test('successful response and CSRF on writes', async () => {
@@ -32,4 +32,35 @@ test('validation and permission errors remain visible', async () => {
  await assert.rejects(api('/api/overview/'), /Invalid amount/);
  globalThis.fetch = async () => new Response('', {status:403});
  await assert.rejects(api('/api/overview/'), /permission/);
+});
+test('sign out posts to the Django logout view and returns to login', async () => {
+ globalThis.document = { cookie: 'csrftoken=signout-token' };
+ let target, called = '';
+ globalThis.location = {assign: value => {target = value;}};
+ globalThis.fetch = async (url, options) => {
+  called = url;
+  assert.equal(options.method, 'POST');
+  assert.equal(options.credentials, 'same-origin');
+  assert.equal(options.headers['X-CSRFToken'], 'signout-token');
+  return new Response('', {status:200});
+ };
+ await signOut();
+ assert.equal(called, '/logout/');
+ assert.equal(target, '/login/');
+});
+test('a rejected sign out does not pretend the session ended', async () => {
+ let navigated = false;
+ globalThis.document = { cookie: 'csrftoken=signout-token' };
+ globalThis.location = {assign: () => {navigated = true;}};
+ globalThis.fetch = async () => new Response('', {status:403});
+ await assert.rejects(signOut(), /did not complete/);
+ assert.equal(navigated, false, 'must not navigate away while the session is still live');
+});
+test('an unreachable server does not pretend the session ended', async () => {
+ let navigated = false;
+ globalThis.document = { cookie: 'csrftoken=signout-token' };
+ globalThis.location = {assign: () => {navigated = true;}};
+ globalThis.fetch = async () => {throw new TypeError('Failed to fetch');};
+ await assert.rejects(signOut(), /could not reach the server/);
+ assert.equal(navigated, false, 'must not navigate away while the session is still live');
 });

@@ -16,15 +16,36 @@ jobs:
           python-version: '3.12'
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: pnpm test
+      # Before pnpm test, deliberately. The frontend suite runs branding.py to
+      # compare the server's contrast maths against the browser copy in
+      # theme.js; that is the server half of the comparison, so Django has to be
+      # on the runner by then. Installed afterwards, the parity test either
+      # cannot run or quietly compares the browser against itself.
       - run: pip install -r backend/requirements.lock
       - run: pip check
+      - run: pnpm test
+      # verify_static asserts the production manifest pipeline (it reads
+      # staticfiles.json and calls url(force=True)), so it must run under the
+      # production storage backend. TEST_SQLITE is deliberately unset because
+      # settings.py refuses SQLite in production; the secret and DB URL are
+      # placeholders, as neither command connects to the database.
+      # ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS are required in production and
+      # are placeholders on the reserved .invalid TLD (RFC 2606), which cannot
+      # resolve to a real host.
       - run: python backend/manage.py collectstatic --noinput
         env:
-          TEST_SQLITE: '1'
+          APP_ENV: production
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-0123456789-abcdefghijklmnopqrstuvwxyz
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          ALLOWED_HOSTS: ci-only.invalid
+          CSRF_TRUSTED_ORIGINS: https://ci-only.invalid
       - run: python backend/manage.py verify_static
         env:
-          TEST_SQLITE: '1'
+          APP_ENV: production
+          DJANGO_SECRET_KEY: ci-only-not-a-real-secret-0123456789-abcdefghijklmnopqrstuvwxyz
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          ALLOWED_HOSTS: ci-only.invalid
+          CSRF_TRUSTED_ORIGINS: https://ci-only.invalid
       - run: python backend/manage.py test ledger google_auth
         env:
           TEST_SQLITE: '1'

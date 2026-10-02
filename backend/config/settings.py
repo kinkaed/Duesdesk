@@ -9,7 +9,31 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env', override=False)
-PRODUCTION = os.environ.get('APP_ENV', 'local') == 'production'
+
+# APP_ENV is the single switch that decides whether this process runs with
+# production security, and it is compared against 'production' exactly. That
+# exactness is deliberate: it is what makes an unrecognised value fall through
+# to the local posture rather than the production one, so anything that can start
+# the app must guarantee the value first.
+#
+# serve.py does that, before Django is imported, so a live service never gets
+# this far with a misspelled APP_ENV. This check covers every other entry point
+# that imports settings without going through serve.py — manage.py, the WSGI
+# application object, a one-off shell. A value this module cannot categorise
+# would otherwise pick a security posture by accident rather than by decision,
+# so it stops here instead.
+#
+# Normalization stays in serve.py, where it can exit with an actionable message.
+# Stripping and lowercasing here would let a typo through unnoticed, which is the
+# outcome this whole check exists to prevent.
+APP_ENV = os.environ.get('APP_ENV', 'local')
+KNOWN_ENVIRONMENTS = ('local', 'test', 'production')
+if APP_ENV not in KNOWN_ENVIRONMENTS:
+    raise ImproperlyConfigured(
+        f'APP_ENV must be exactly one of {", ".join(KNOWN_ENVIRONMENTS)}; got {APP_ENV!r}. '
+        'Start through serve.py, which reports this before Django loads.'
+    )
+PRODUCTION = APP_ENV == 'production'
 DEMO_MODE = not PRODUCTION
 DEBUG = os.environ.get('DJANGO_DEBUG', 'false').lower() in ('1', 'true', 'yes', 'on')
 RENDER_EXTERNAL_HOSTNAME = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip()
@@ -27,13 +51,24 @@ def csv_values(value):
 
 
 if PRODUCTION:
+    # Refused at import rather than left to `manage.py check --deploy`, which is
+    # what currently catches it. That check only runs as a deploy step, so any
+    # production process started another way — a shell, a one-off command, a
+    # second service on the same image — would have booted with DEBUG on and
+    # served tracebacks with settings and environment detail to anybody who asked.
+    # Refusing to import means there is no such process, whatever ran it.
+    if DEBUG:
+        raise ImproperlyConfigured(
+            'DJANGO_DEBUG must not be enabled when APP_ENV=production. Unset it, '
+            'or set APP_ENV=local for a machine that is not serving anyone.'
+        )
     SECRET_KEY = required('DJANGO_SECRET_KEY')
     if len(SECRET_KEY) < 50:
         raise ImproperlyConfigured('Use a random DJANGO_SECRET_KEY of at least 50 characters.')
-    explicit_hosts = csv_values(os.environ.get('ALLOWED_HOSTS', ''))
+    explicit_hosts = required('ALLOWED_HOSTS')
     if '*' in explicit_hosts:
         raise ImproperlyConfigured('Explicit ALLOWED_HOSTS are required.')
-    hosts = list(explicit_hosts)
+    hosts = csv_values(explicit_hosts)
     if RENDER_EXTERNAL_HOSTNAME and RENDER_EXTERNAL_HOSTNAME not in hosts:
         hosts.append(RENDER_EXTERNAL_HOSTNAME)
     ALLOWED_HOSTS = hosts
@@ -56,20 +91,24 @@ INSTALLED_APPS = [
     'axes',
     'ledger',
     'django.contrib.sites',
-    'allauth',
-    'allauth.account',
-    'allauth.socialaccount',
-    'allauth.socialaccount.providers.google',
+    # The app label is historical: it now holds only the emailed-code signup
+    # verification and has no external provider in it. Renaming the label would
+    # orphan every applied migration record on an existing database, so it stays.
     'google_auth',
 ]
 MIDDLEWARE = [
+    # Outermost, so every request gets a correlation id: the redirect from
+    # SecurityMiddleware included.
+    'ledger.middleware.RequestCorrelationMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    # Django's own CSRF middleware, unmodified, so the W003 and W016 deploy
+    # checks that identify it by dotted path keep working. The refusal is
+    # observed by the failure view below rather than by subclassing.
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'allauth.account.middleware.AccountMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'ledger.middleware.SecurityHeadersMiddleware',
@@ -86,8 +125,8 @@ else:
     default_url = required('DATABASE_URL') if PRODUCTION else os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/duesdesk')
     DATABASES = {'default': dj_database_url.config(default=default_url, conn_max_age=600, conn_health_checks=True)}
 # ModelBackend first so password login keeps its existing behaviour; the Axes
-# backend stays for lockout. allauth's own backend is deliberately not listed:
-# no allauth route is mounted and Google signs in explicitly via ModelBackend.
+# backend stays for lockout. Duesdesk authenticates with a username and password
+# only; there is no external identity provider in the stack.
 AUTHENTICATION_BACKENDS = ['django.contrib.auth.backends.ModelBackend', 'axes.backends.AxesStandaloneBackend']
 AXES_FAILURE_LIMIT = 5
 AXES_COOLOFF_TIME = timedelta(minutes=15)
@@ -108,10 +147,22 @@ STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 WHITENOISE_USE_FINDERS = not PRODUCTION
-STORAGES = {'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'}}
+# WhiteNoise caches the list of discoverable files at startup, so with USE_FINDERS
+# a file added or changed while the dev server is running 404s or serves stale
+# until a restart. Re-scan on each request outside production, where the cache
+# and the hashed filenames are what make static serving cheap.
+WHITENOISE_AUTOREFRESH = not PRODUCTION
+# Hashed manifest storage makes {% static %} depend on a collected staticfiles.json,
+# so a stale or uncollected manifest silently 404s the auth and receipt stylesheets.
+# Only production pays for the cache-busting hashes; local dev resolves names directly.
+STATICFILES_BACKEND = 'whitenoise.storage.CompressedManifestStaticFilesStorage' if PRODUCTION else 'django.contrib.staticfiles.storage.StaticFilesStorage'
+STORAGES = {'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'}, 'staticfiles': {'BACKEND': STATICFILES_BACKEND}}
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = '/login/'
-LOGIN_REDIRECT_URL = '/'
+# A real page path, not '/'. In development the Vite base is '/static/app/', so a
+# redirect to '/' is answered at the base and the app ends up on a URL that is not
+# one of its pages: it renders, but a reload or a shared link loses the place.
+LOGIN_REDIRECT_URL = '/overview/'
 LOGOUT_REDIRECT_URL = '/login/'
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
@@ -119,19 +170,56 @@ SESSION_COOKIE_AGE = 3600
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 SESSION_COOKIE_SECURE = PRODUCTION
 CSRF_COOKIE_SECURE = PRODUCTION
+# Records security.csrf.failure, then renders Django's own failure page exactly
+# as it would have been rendered. Wrapping the documented view rather than
+# subclassing the middleware keeps the W003/W016 deploy checks meaningful.
+CSRF_FAILURE_VIEW = 'ledger.middleware.csrf_failure'
 origins = csv_values(os.environ.get('CSRF_TRUSTED_ORIGINS', ''))
 if RENDER_EXTERNAL_HOSTNAME:
     https_origin = f'https://{RENDER_EXTERNAL_HOSTNAME}'
     if https_origin not in origins:
         origins.append(https_origin)
+# In development the browser talks to the Vite dev server and Vite proxies the
+# request on, rewriting Host, so Django sees the request arriving from its own
+# origin while the browser's Origin header names the dev server. CSRF rejects
+# that mismatch with 403 on every form post, including signing in. The dev
+# origins are loopback-only and are never trusted in production, where the
+# browser and Django share a single origin and no extra entry is needed.
+if not PRODUCTION:
+    for dev_origin in csv_values(os.environ.get('DEV_TRUSTED_ORIGINS', 'http://127.0.0.1:5173,http://localhost:5173')):
+        if dev_origin not in origins:
+            origins.append(dev_origin)
+# Empty here means the app accepts no cross-origin form post at all, so every
+# write — signing in included — fails with a 403. That is the safe direction,
+# but it presents as an unexplained outage rather than a configuration error, and
+# nothing in the boot sequence said so. RENDER_EXTERNAL_HOSTNAME alone is enough
+# on Render, where the platform always sets it for a web service.
+if PRODUCTION and not origins:
+    raise ImproperlyConfigured(
+        'CSRF_TRUSTED_ORIGINS is required in production (comma-separated https '
+        'origins), unless RENDER_EXTERNAL_HOSTNAME is set.'
+    )
 CSRF_TRUSTED_ORIGINS = origins
 SECURE_SSL_REDIRECT = PRODUCTION
 SECURE_HSTS_SECONDS = 31536000 if PRODUCTION else 0
 SECURE_HSTS_INCLUDE_SUBDOMAINS = PRODUCTION
 SECURE_HSTS_PRELOAD = PRODUCTION
 SECURE_REFERRER_POLICY = 'same-origin'
-if os.environ.get('TRUST_PROXY', '0') == '1':
+# One flag, read once. serve.py configures waitress from it, and
+# observability.proxy_trusted() reads the same value, so the audited client IP
+# and the proxy handling can never disagree about whether a proxy is trusted.
+TRUST_PROXY = os.environ.get('TRUST_PROXY', '0') == '1'
+if TRUST_PROXY:
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# Which peer the reverse proxy must come from, and which proxy headers to
+# honour from it. waitress accepts a single address or '*', so a wildcard here
+# means "whoever reaches me". Render does not publish a proxy CIDR, and it
+# appends to X-Forwarded-For rather than replacing it, so x-forwarded-for must
+# never be honoured while TRUSTED_PROXY_IP is '*': the first value in that
+# header is attacker-chosen. deployment_check refuses that combination.
+TRUSTED_PROXY_IP = os.environ.get('TRUSTED_PROXY_IP', '127.0.0.1')
+TRUSTED_PROXY_HEADERS = csv_values(
+    os.environ.get('TRUSTED_PROXY_HEADERS', 'x-forwarded-proto'))
 X_FRAME_OPTIONS = 'DENY'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 2097152
 FILE_UPLOAD_MAX_MEMORY_SIZE = 2097152
@@ -147,29 +235,37 @@ EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '')
 EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', '1') == '1'
 EMAIL_TIMEOUT = 15
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Duesdesk <noreply@localhost>')
-LOGGING = {'version': 1, 'disable_existing_loggers': False, 'handlers': {'console': {'class': 'logging.StreamHandler'}}, 'root': {'handlers': ['console'], 'level': 'WARNING'}, 'loggers': {'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False}, 'ledger': {'handlers': ['console'], 'level': 'INFO', 'propagate': False}}}
-
-# Google uses explicit login/verification entry points and one shared callback.
-SITE_ID = 1
-GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '').strip()
-GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', '').strip()
-ACCOUNT_ADAPTER = 'google_auth.adapters.AccountAdapter'
-SOCIALACCOUNT_ADAPTER = 'google_auth.adapters.GoogleAdapter'
-ACCOUNT_LOGIN_METHODS = {'username'}
-ACCOUNT_SIGNUP_FIELDS = ['username*', 'email*', 'password1*', 'password2*']
-ACCOUNT_EMAIL_VERIFICATION = 'mandatory'
-ACCOUNT_UNIQUE_EMAIL = True
-ACCOUNT_LOGIN_ON_EMAIL_CONFIRMATION = False
-SOCIALACCOUNT_LOGIN_ON_GET = True
-SOCIALACCOUNT_AUTO_SIGNUP = False
-SOCIALACCOUNT_EMAIL_AUTHENTICATION = False  # Explicit strict matching in our adapter.
-SOCIALACCOUNT_STORE_TOKENS = False
-SOCIALACCOUNT_EMAIL_VERIFICATION = 'mandatory'
-SOCIALACCOUNT_PROVIDERS = {
-    'google': {
-        'APP': {'client_id': GOOGLE_CLIENT_ID, 'secret': GOOGLE_CLIENT_SECRET, 'key': ''},
-        'SCOPE': ['openid', 'email', 'profile'],
-        'AUTH_PARAMS': {'access_type': 'online'},
-        'OAUTH_PKCE_ENABLED': True,
+# Terminal logs are the main debugging surface, so local defaults favour
+# visibility: one access line per request, human readable, with the correlation
+# id inline. Production switches the formatter to JSON for aggregation and
+# raises the root level to INFO so application logs are not silently dropped.
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO' if PRODUCTION else 'INFO').upper()
+PLAIN_FORMAT = '%(asctime)s %(levelname)-7s %(name)-22s %(message)s [rid=%(request_id)s %(method)s %(path)s %(status)s %(duration_ms)sms actor=%(actor_id)s]'
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'filters': {'request_context': {'()': 'ledger.observability.RequestContextFilter'}},
+    'formatters': {
+        'plain': {'format': PLAIN_FORMAT},
+        'json': {'()': 'ledger.observability.JsonFormatter'},
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'json' if PRODUCTION else 'plain',
+            'filters': ['request_context'],
+        },
+    },
+    'root': {'handlers': ['console'], 'level': LOG_LEVEL},
+    'loggers': {
+        'django.request': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False},
+        # CSRF failures and other security rejections are warnings worth seeing.
+        'django.security': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'axes': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        'ledger': {'handlers': ['console'], 'level': LOG_LEVEL, 'propagate': False},
     },
 }
+
+# Duesdesk authenticates with a username and a password. There is no external
+# identity provider, so no OAuth client id or secret is read, stored or required.
+SITE_ID = 1

@@ -1,0 +1,83 @@
+/*
+ * Auth page isolation.
+ *
+ * The sign-up page loads two stylesheets that were written independently:
+ *
+ *   app.css        the auth and receipt stylesheet, 7.5 KB
+ *   app/style.css  the application stylesheet, built from the repo-root
+ *                  styles.css, which also styles the sign-up page's preview
+ *
+ * The second one is loaded on purpose: the theme preview has to be drawn by the
+ * real rules or it would only be an approximation, and a copied subset would
+ * drift from the application the moment either file changed.
+ *
+ * The cost is that app/style.css also declares bare elements and several class
+ * names the auth page already uses, for the application rather than for this
+ * page. It loads second, so it wins the cascade. This file loads third and takes
+ * those declarations back for .login-card, which is the whole of the sign-up
+ * form. Every rule here therefore re-states something app.css already says, at
+ * a higher specificity, for a narrower scope.
+ *
+ * What collides, and why it matters:
+ *
+ *   .brand      app.css styles the card's wordmark; app/style.css styles the
+ *               sidebar's. The application version is white, so left alone it
+ *               would render white text on the card's white surface.
+ *   body        app/style.css pins the page background to --bg; app.css pins it
+ *               to --org-primary so the sign-in page is branded.
+ *   h1, p, p a  the application sets a larger heading scale and a --green link
+ *               colour, which no longer matches the auth card.
+ *   label,input app/style.css raises margins and control heights for the
+ *               dialogs, which is a lot of space for a one-column form.
+ *   .primary    the application theme rule recolours it from --org-primary.
+ *               app.css does the same thing, so this is a no-op kept for
+ *               symmetry rather than as a fix.
+ *
+ * Anything not listed here is genuinely new from the application (the preview
+ * and its controls) and is meant to apply.
+ */
+
+.login-page{background:var(--org-primary);color:var(--ink);font-size:15px;line-height:1.6}
+.login-card{background:var(--surface);border-radius:var(--radius-lg);padding:34px;width:100%;max-width:420px;color:var(--ink)}
+
+/* Bare elements, restored to the auth page's values. */
+.login-card h1{font-size:24px;letter-spacing:-.3px;line-height:1.25}
+.login-card p{color:var(--muted);line-height:1.6}
+.login-card p a{color:var(--green)}
+.login-card label{display:block;font-size:13px;font-weight:500;margin-top:16px}
+.login-card label input,.login-card label select{display:block;margin-top:6px}
+.login-card input,.login-card select{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius);width:100%;min-height:40px;padding:9px 12px;font-size:14px;color:var(--ink)}
+.login-card .small{font-size:12.5px!important}
+.login-card .muted{color:var(--muted)}
+.login-card .eyebrow{display:block;font-size:11px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint)}
+
+/* The wordmark. app.css lays it out with the logo tile beside the name; the
+   application version is the sidebar's, and the two must not be confused. */
+.login-card .brand{display:flex;align-items:center;gap:9px;margin-bottom:28px;font-size:19px;font-weight:650;letter-spacing:-.3px;text-decoration:none;color:var(--ink)}
+.login-card .brand-icon{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--radius);background:var(--org-primary);color:var(--org-primary-text);font-size:19px;font-weight:700}
+
+/* Buttons, as the auth page draws them. */
+.login-card .button{border:1px solid transparent;border-radius:var(--radius);padding:9px 15px;font-weight:500;font-size:14px;text-decoration:none;display:inline-flex;justify-content:center;align-items:center;gap:7px;white-space:nowrap}
+.login-card .button.primary{background:var(--org-primary);color:var(--org-primary-text);width:100%;margin:20px 0 12px}
+.login-card .button.secondary{background:var(--surface);color:var(--ink);border-color:var(--line-strong)}
+
+/* Focus rings. The application uses a fixed green that is checked for
+   visibility on the card's white surface, which is the same reasoning as the
+   base sheet's. Kept identical rather than re-derived. */
+.login-card input:focus,.login-card select:focus{outline:2px solid #4f7a5f;outline-offset:1px;border-color:#4f7a5f}
+.login-card button:focus-visible,.login-card a:focus-visible{outline:2px solid #4f7a5f;outline-offset:2px}
+
+/* The theme fieldset. app.css has no fieldset rules at all, so the application's
+   defaults would otherwise leave a border and a legend indent. */
+.login-card .theme-controls{border:0;margin:22px 0 0;padding:0;min-width:0}
+.login-card .theme-controls legend{padding:0;margin-bottom:4px}
+
+/* Django form errors, which app.css styles as .errorlist. */
+.login-card .errorlist{color:var(--danger);font-size:13px;list-style:none;padding:0;margin:0 0 10px}
+.login-card .helptext,.login-card .helptext ul{color:var(--faint);font-size:12px;margin:6px 0 0;padding-left:16px}
+
+@media(max-width:760px){
+  .login-page{padding:16px}
+  .login-card{padding:24px}
+  .login-card .brand{margin-bottom:22px}
+}

@@ -1,26 +1,40 @@
 from django.contrib.auth import views as auth
 from django.urls import path
-from google_auth import views as google_views
-from google_auth.forms import GuardedAuthenticationForm, GooglePasswordResetForm
+from google_auth import views as verification_views
+from google_auth.forms import AccountRecoveryForm, GuardedAuthenticationForm
 from ledger import views, organization_views as org_views
+from ledger.auth_views import (
+    AuditableLoginView,
+    AuditableLogoutView,
+    AuditablePasswordChangeView,
+    AuditablePasswordResetConfirmView,
+    AuditableRecoveryView,
+)
 
 urlpatterns = [
-    path('accounts/google/login/', google_views.google_login, name='google_login'),
-    # The one callback for both Google flows. The session, set by the entry
-    # point above, decides whether this verifies a signup or opens an account.
-    path('accounts/google/login/callback/', google_views.google_login_callback, name='google_callback'),
-    path('accounts/google/verify/', google_views.google_verify, name='google_verify'),
-    path('signup/verify/', google_views.verify, name='verify_email'),
+    path('signup/verify/', verification_views.verify, name='verify_email'),
     path('', views.home),
+    # Every page of the application is the same shell, reached by its own path so
+    # the address bar identifies the page and the back button steps between pages.
+    # Reusing views.home keeps a single set of login and membership checks rather
+    # than a parallel copy per page. These names are the source of truth for
+    # PAGE_PATHS in work.tsx and for the SPA_PATHS rewrite in vite.config.ts.
+    *[
+        path(f'{page}/', views.home, name=page)
+        for page in ('overview', 'members', 'payments', 'reports', 'manage', 'audit', 'profile')
+    ],
     path('api/session/', views.session_info),
-    path('login/', google_views.LoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
-    path('logout/', auth.LogoutView.as_view()),
+    # The auditable subclasses stay in charge (they are the events that happen
+    # before any ordinary view runs), and take the Axes-guarded form so a locked
+    # account is refused without a database lookup.
+    path('login/', AuditableLoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
+    path('logout/', AuditableLogoutView.as_view()),
     path('signup/', org_views.signup, name='signup'),
-    path('account/password/', auth.PasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),
+    path('account/password/', AuditablePasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),
     path('account/password/done/', auth.PasswordChangeDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password changed','description':'Your new password is ready to use.'}), name='password_change_done'),
-    path('account/reset/', views.RecoveryView.as_view(form_class=GooglePasswordResetForm), name='password_reset'),
+    path('account/reset/', AuditableRecoveryView.as_view(form_class=AccountRecoveryForm), name='password_reset'),
     path('account/reset/sent/', auth.PasswordResetDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Check your email','description':'If this email belongs to an active account, a reset link will be sent. Check spam too. Contact your secretary if it does not arrive.'}), name='password_reset_done'),
-    path('account/reset/<uidb64>/<token>/', auth.PasswordResetConfirmView.as_view(template_name='registration/account_form.html', extra_context={'heading':'Choose a new password','button':'Save password'}), name='password_reset_confirm'),
+    path('account/reset/<uidb64>/<token>/', AuditablePasswordResetConfirmView.as_view(template_name='registration/account_form.html', extra_context={'heading':'Choose a new password','button':'Save password'}), name='password_reset_confirm'),
     path('account/reset/complete/', auth.PasswordResetCompleteView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password reset','description':'You can now sign in with your new password.'}), name='password_reset_complete'),
     path('api/overview/', views.overview),
     path('api/members/', views.members),
@@ -34,8 +48,10 @@ urlpatterns = [
     path('export/excel/', views.export_excel),
     path('api/settings/', views.organisation_settings),
     path('api/audit/', views.audit_log),
+    path('api/audit/<int:pk>/', views.audit_event),
     path('api/accounts/', views.accounts),
     path('api/accounts/<int:pk>/disable/', views.disable_account),
+    path('api/accounts/<int:pk>/enable/', views.enable_account),
     path('api/import/template/', views.import_template),
     path('api/import/preview/', views.import_preview),
     path('api/import/commit/', views.import_commit),

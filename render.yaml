@@ -6,7 +6,8 @@ services:
     rootDir: .
     region: frankfurt
     healthCheckPath: /health/
-    buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static && python backend/manage.py migrate --noinput
+    buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static
+    preDeployCommand: python backend/manage.py migrate --noinput && python backend/manage.py deployment_check
     startCommand: cd backend && python serve.py
     envVars:
       - key: APP_ENV
@@ -21,10 +22,22 @@ services:
         value: "1"
       - key: TRUSTED_PROXY_IP
         value: "*"
+      # Render publishes no proxy CIDR, so waitress sees only "*" and the only
+      # proxy header it may honour is which protocol the ingress saw. Trusting
+      # x-forwarded-for from a wildcard peer is refused by deployment_check:
+      # Render appends to it, so the first value is whatever the client sent.
+      - key: TRUSTED_PROXY_HEADERS
+        value: x-forwarded-proto
       - key: DJANGO_SECRET_KEY
         generateValue: true
       - key: ALLOWED_HOSTS
         value: duesdesk.onrender.com
+      # Stated explicitly rather than left to RENDER_EXTERNAL_HOSTNAME, so the
+      # origin the browser actually sends is visible in the blueprint next to
+      # the hosts it must match. Not a secret. Add the custom domain here too
+      # when one is pointed at this service.
+      - key: CSRF_TRUSTED_ORIGINS
+        value: https://duesdesk.onrender.com
       - key: DATABASE_URL
         sync: false
       - key: EMAIL_HOST

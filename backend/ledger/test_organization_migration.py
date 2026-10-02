@@ -47,6 +47,21 @@ class OrganizationMigrationTests(TransactionTestCase):
         self.assertEqual(kept.name,'Existing Association');self.assertEqual(kept.contact,'Old contact');self.assertTrue(kept.public_id)
         self.assertGreater(new.get_model('ledger','Organisation').objects.create(name='Next organization').pk,1)
 
+    def test_missing_accounts_get_least_privilege_roles(self):
+        # Reproduce the real ordering: 0004 only ever over-privileged accounts
+        # that already existed when it ran, so start one migration earlier and
+        # create them there.
+        executor=MigrationExecutor(connection)
+        executor.migrate([('ledger','0003_receipt_snapshots')])
+        old=executor.loader.project_state([('ledger','0003_receipt_snapshots')]).apps
+        old.get_model('auth','User').objects.create(username='old-secretary',is_staff=True,password='!')
+        old.get_model('auth','User').objects.create(username='root',is_superuser=True,password='!')
+        old.get_model('auth','User').objects.create(username='ordinary',is_staff=False,password='!')
+        new=self.forward()
+        # 0004 must not pre-empt 0006: an ordinary account is read-only.
+        roles=new.get_model('ledger','UserAccess').objects.values_list('user__username','role')
+        self.assertEqual(sorted(roles),[('old-secretary','secretary'),('ordinary','auditor'),('root','secretary')])
+
     def test_empty_database_gets_default_and_safe_next_identity(self):
         new=self.forward();Org=new.get_model('ledger','Organisation')
         default=Org.objects.get(pk=1)

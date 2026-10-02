@@ -15,12 +15,12 @@ from .models import Organisation, UserAccess, Member, Payment, Allocation, DuesM
 from .services import record_payment
 from .branding import decode_logo, text_color, luminance, branding_json, DEFAULTS
 from google_auth.models import PendingSignup
-from google_auth.testsupport import GoogleTestMixin
+from google_auth.testsupport import SignupTestMixin
 
 STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}}
 
 @override_settings(PASSWORD_HASHERS=['django.contrib.auth.hashers.MD5PasswordHasher'],STORAGES=STORAGES)
-class OrganizationTests(GoogleTestMixin, TestCase):
+class OrganizationTests(SignupTestMixin, TestCase):
     def setUp(self):
         self.a=Organisation.objects.create(name='Organization A',primary='#123456')
         self.b=Organisation.objects.create(name='Organization B',primary='#eecc22')
@@ -39,9 +39,9 @@ class OrganizationTests(GoogleTestMixin, TestCase):
     def signup_data(self,email='new@example.com'):
         return {'username':'new-secretary','email':email,'password1':'A-Long-New-Secret-Phrase!','password2':'A-Long-New-Secret-Phrase!','organization_name':'New independent organization'}
 
-    def google_signup(self,client,data,token=''):
+    def code_signup(self,client,data,token=''):
         """Sign up the way a real secretary must now: verify, then submit."""
-        return self.signup_with_google(data,invite=token,client=client)
+        return self.signup_with_code(data,invite=token,client=client)
 
     def invitation(self):
         response=self.post('/api/invites/',{'email':'new@example.com','organization_id':self.b.pk})
@@ -74,9 +74,15 @@ class OrganizationTests(GoogleTestMixin, TestCase):
     def test_cross_org_mutations_are_rejected_and_spoofed_org_is_ignored(self):
         self.assertEqual(self.post(f'/api/members/{self.mb.pk}/',{'name':'hacked'}).status_code,404)
         data={**self.payload,'member_id':self.mb.pk,'request_key':str(uuid4()),'organization_id':self.b.pk}
-        self.assertEqual(self.post('/api/payments/',data).status_code,400)
-        self.assertEqual(self.post('/api/payments/preview/',data).status_code,400)
-        self.assertEqual(self.post(f'/api/payments/{self.pb.pk}/void/',{'reason':'Wrong organization'}).status_code,400)
+        # 404, not 400, for a record that belongs to another organization. It used
+        # to be a 400 carrying "Member matching query does not exist." from the
+        # ORM, which both leaked the wording and answered a different status to the
+        # member and account endpoints above for exactly the same attempt. The
+        # answer now has to be identical whether the id is absent or someone
+        # else's, or the status code alone confirms it exists.
+        self.assertEqual(self.post('/api/payments/',data).status_code,404)
+        self.assertEqual(self.post('/api/payments/preview/',data).status_code,404)
+        self.assertEqual(self.post(f'/api/payments/{self.pb.pk}/void/',{'reason':'Wrong organization'}).status_code,404)
         self.assertEqual(self.post(f'/api/accounts/{self.ub.pk}/disable/').status_code,404)
         response=self.post('/api/members/',{'name':'Own new member','joined':'2026-09-01','organization_id':self.b.pk})
         self.assertEqual(response.status_code,201,response.content)
@@ -96,7 +102,7 @@ class OrganizationTests(GoogleTestMixin, TestCase):
         self.assertContains(wrong,'Use the email address')
         self.assertFalse(PendingSignup.objects.exists())
         self.assertFalse(User.objects.filter(username='new-secretary').exists())
-        self.assertEqual(self.google_signup(visitor,self.signup_data(),token).status_code,302)
+        self.assertEqual(self.code_signup(visitor,self.signup_data(),token).status_code,302)
         user=User.objects.get(username='new-secretary')
         self.assertEqual(user.access.organization,self.a);self.assertEqual(user.access.role,'secretary')
         invite.refresh_from_db();self.assertEqual(invite.used_by,user)
@@ -116,7 +122,7 @@ class OrganizationTests(GoogleTestMixin, TestCase):
         self.assertEqual(Client().get(result['url']).status_code,400)
 
     def test_signup_without_invite_creates_separate_org(self):
-        visitor=Client();response=self.google_signup(visitor,self.signup_data())
+        visitor=Client();response=self.code_signup(visitor,self.signup_data())
         self.assertEqual(response.status_code,302,response.content)
         user=User.objects.get(username='new-secretary')
         self.assertNotIn(user.access.organization_id,[self.a.pk,self.b.pk])
@@ -221,7 +227,7 @@ class OrganizationTests(GoogleTestMixin, TestCase):
 
     def test_anonymous_logo_preview_binds_to_signup_session(self):
         visitor=Client();data=visitor.post('/api/branding/preview/',{'logo':self.image()}).json()
-        response=self.google_signup(visitor,{**self.signup_data(),**data})
+        response=self.code_signup(visitor,{**self.signup_data(),**data})
         self.assertEqual(response.status_code,302,response.content)
         user=User.objects.get(username='new-secretary');self.assertTrue(user.access.organization.logo)
         self.assertEqual(user.access.organization.primary,'#cc2244')
@@ -246,11 +252,14 @@ class OrganizationTests(GoogleTestMixin, TestCase):
 
     def test_new_write_routes_enforce_csrf_and_readonly_roles(self):
         client=Client(enforce_csrf_checks=True);client.force_login(self.ua)
-        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/']:
+        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/','/api/accounts/',f'/api/accounts/{self.ua.pk}/disable/',f'/api/accounts/{self.ua.pk}/enable/']:
             self.assertEqual(client.post(path,{}).status_code,403)
         reader=User.objects.create_user('readonly-a')
         UserAccess.objects.create(user=reader,organization=self.a,role='auditor')
         self.client.force_login(reader)
         self.assertEqual(self.client.get('/api/invites/').status_code,403)
-        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/']:
+        for path in ['/api/invites/','/api/organization/leave/','/api/branding/preview/','/api/accounts/',f'/api/accounts/{self.ua.pk}/disable/',f'/api/accounts/{self.ua.pk}/enable/']:
             self.assertEqual(self.post(path).status_code,403)
+        # A read-only role must not be able to mint an account either.
+        self.assertEqual(self.post('/api/accounts/',{'username':'sneaky','email':'sneaky@example.com','password':'An-Excellent-Private-Phrase!','role':'auditor'}).status_code,403)
+        self.assertFalse(User.objects.filter(username='sneaky').exists())
