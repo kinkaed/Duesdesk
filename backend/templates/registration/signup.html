@@ -5,21 +5,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Create account — Duesdesk</title>
 <link rel="stylesheet" href="{% static 'app.css' %}">
-{% comment %}
-  app/style.css is the application's own stylesheet, built by Vite from styles.css
-  at the repository root. It is loaded so the theme preview is drawn by the same
-  rules that draw the real interface, rather than by a hand-copied subset that
-  would drift. In development Vite serves this path live from source, so editing
-  styles.css is visible on reload; in production {% static %} resolves it through
-  the hashed manifest.
-
-  Because it redefines bare elements and several shared class names for the
-  application, theme-preview.css re-asserts the auth page's own rules inside
-  .login-card afterwards. Load order matters: app.css, then the application
-  sheet, then the isolation.
-{% endcomment %}
-<link rel="stylesheet" href="{% static 'app/style.css' %}">
-<link rel="stylesheet" href="{% static 'theme-preview.css' %}">
 </head>
 <body class="login-page">
 <section class="login-card">
@@ -31,151 +16,18 @@
 <p>Create a new organization. These are secretary accounts only; members are entered by your secretary.</p>
 {% endif %}
 
+{% if limited %}<p class="error" role="alert">Too many sign-up attempts from here. Please try again in a little while.</p>{% endif %}
 <form method="post" id="signup-form">
 {% csrf_token %}
 {{ form.as_p }}
 {% if not invite %}
 <label>Organization name<input name="organization_name" maxlength="120" value="{{ organization_name }}" required></label>
-<label>Logo (optional)<input id="logo-upload" type="file" accept="image/png,image/jpeg,image/webp"></label>
-<p class="small">PNG, JPEG or WebP, up to 1 MB and 4 million pixels. Review the suggested colors below.</p>
-<noscript>Enable JavaScript to upload a logo. You can still create your organization without one.</noscript>
-<img id="logo-preview" alt="Logo preview" width="80" hidden>
-<p class="error" id="logo-error" role="alert"></p>
-<input type="hidden" name="logo_token" value="{{ logo_token }}">
-
-{% comment %}
-  The three inputs stay plain named colour fields. The preview reads them and
-  repaints from them; it never holds a second copy of the palette, and it never
-  becomes the thing that is submitted.
-{% endcomment %}
-<fieldset class="theme-controls">
-<legend class="eyebrow">Workspace theme</legend>
-
-<div class="theme-row">
-<input type="color" id="theme-primary" name="primary" value="{{ palette.primary }}" aria-describedby="theme-primary-role">
-<div>
-<label for="theme-primary">Primary colour</label>
-<p class="theme-hex" data-theme-hex="primary">{{ palette.primary }}</p>
-<p class="theme-role" id="theme-primary-role">Sidebar, primary buttons, and the links inside your content.</p>
-</div>
-</div>
-
-<div class="theme-row">
-<input type="color" id="theme-secondary" name="secondary" value="{{ palette.secondary }}" aria-describedby="theme-secondary-role">
-<div>
-<label for="theme-secondary">Secondary colour</label>
-<p class="theme-hex" data-theme-hex="secondary">{{ palette.secondary }}</p>
-<p class="theme-role" id="theme-secondary-role">The selected item in the sidebar, your avatar, and the workspace tag.</p>
-</div>
-</div>
-
-<div class="theme-row">
-<input type="color" id="theme-accent" name="accent" value="{{ palette.accent }}" aria-describedby="theme-accent-role">
-<div>
-<label for="theme-accent">Accent colour</label>
-<p class="theme-hex" data-theme-hex="accent">{{ palette.accent }}</p>
-<p class="theme-role" id="theme-accent-role">The logo mark, and the highlight a sidebar item takes on hover.</p>
-</div>
-</div>
-
-<div class="theme-actions">
-<button type="button" class="theme-reset" id="theme-reset" hidden>Reset to default</button>
-<p class="small muted" id="theme-changed" hidden>Changed from the default.</p>
-</div>
-
-<div class="theme-warnings" id="theme-warnings" role="status" aria-live="polite"></div>
-<noscript><p class="small muted">The live preview needs JavaScript. The colours you choose are still saved.</p></noscript>
-</fieldset>
-
-{% comment %}
-  A real Duesdesk screen, built from the application's own class names and fed
-  by the same --org-* variables the running app uses. Nothing here paints a
-  colour, and nothing here is connected to a record: the names, codes and
-  amounts are invented for the purpose.
-{% endcomment %}
-<div class="theme-preview" id="theme-preview">
-<div class="theme-preview-bar">
-<span class="theme-preview-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-<strong>Live preview</strong>
-<span>Sample workspace — no real records</span>
-</div>
-<div class="theme-preview-scroll">
-<div class="theme-preview-stage">
-<div class="app-shell" id="theme-preview-app">
-
-<aside class="sidebar">
-<span class="brand"><span class="logo-mark" id="theme-preview-mark">d.</span>duesdesk<span>.</span></span>
-<nav aria-label="Preview navigation">
-<span class="nav active" aria-current="page">Overview</span>
-<span class="nav">Members</span>
-<span class="nav">Payments</span>
-<span class="nav">Reports</span>
-</nav>
-<span class="user-block"><span class="avatar">AO</span><span class="user-block-text"><strong>Sample secretary</strong><small>Secretary</small></span></span>
-</aside>
-
-<main class="main">
-<header class="topbar">
-<div>Workspace <span>/</span> <strong>Overview</strong></div>
-<div class="topbar-right">
-<span class="workspace-tag">Sample workspace</span>
-<span class="account-link">Change password</span>
-</div>
-</header>
-<div class="content">
-<div class="page-heading">
-<div><h1>Overview</h1><p>Where the association stands this month.</p></div>
-<span class="button primary">Record payment</span>
-</div>
-
-<div class="metrics">
-<div class="metric"><span>Money received this month</span><strong>GH¢ 12,450</strong><small>By the date payment was received</small></div>
-<div class="metric"><span>Outstanding this month</span><strong>GH¢ 3,175</strong><small>All billable members</small></div>
-<div class="metric"><span>Fully paid members</span><strong>41 / 58</strong><small>Billed for this month</small></div>
-<div class="metric"><span>Dues covered this month</span><strong>GH¢ 15,625</strong><small>Including payments in advance</small></div>
-</div>
-
-<section class="panel">
-<div class="panel-heading">
-<div><h2>Member directory <span class="count">4</span></h2><p>Choose a name to open the profile and payment history.</p></div>
-<span class="button secondary">Add member</span>
-</div>
-<div class="filters">
-<div class="search-field"><input type="search" value="" placeholder="Search name, member ID or phone" aria-label="Search members" tabindex="-1" readonly></div>
-<select aria-label="Payment status" tabindex="-1"><option>All payment statuses</option></select>
-</div>
-<div class="table-wrap">
-<table>
-<caption class="sr-only">Sample member list showing each payment status</caption>
-<thead><tr><th>Member</th><th>Status</th><th>Arrears</th><th>Actions</th></tr></thead>
-<tbody>
-{% for row in preview_members %}<tr><td><span class="member-cell"><span class="member-name">{{ row.name }}</span><small>{{ row.code }}</small></span></td><td><span class="badge {{ row.status }}">{{ row.status_label }}</span></td><td>{{ row.arrears }}</td><td><span class="row-actions"><span class="text-button">View</span></span></td></tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-</section>
-
-<div class="alert" role="note">
-<p><b>A sample notice.</b> Payment and audit colours stay the same in every workspace, so a failure always looks like a failure.</p>
-</div>
-</div>
-</main>
-
-</div>
-</div>
-</div>
-<p class="theme-preview-note">Every name, code and amount above is invented. Hover a sidebar item to see the accent colour.</p>
-</div>
-
 {% endif %}
 <button class="button primary" type="submit" data-busy="Creating account.">Register as a Secretary</button>
 </form>
 
 <p>Already registered? <a href="/login/">Sign in</a></p>
 </section>
-<script src="{% static 'theme.js' %}" defer></script>
 <script src="{% static 'auth-ui.js' %}" defer></script>
-<script src="{% static 'signup.js' %}" defer></script>
 </body>
 </html>

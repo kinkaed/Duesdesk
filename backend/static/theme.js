@@ -2,9 +2,9 @@
  * The organization theme, in the browser.
  *
  * This is the single browser implementation of the palette rules. Both theme
- * surfaces use it: the Django sign-up page (signup.js) and the React Settings
- * form (work.tsx, through theme-bridge.ts). Neither surface computes a colour
- * of its own.
+ * surfaces use it: the Django first-run branding step (signup-branding.js) and
+ * the React Settings form (work.tsx, through theme-bridge.ts). Neither surface
+ * computes a colour of its own.
  *
  * The authoritative definition of these rules is backend/ledger/branding.py,
  * which is what actually stores the palette and computes the text colours it

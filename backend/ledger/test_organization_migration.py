@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
 from django.test import TransactionTestCase
 
 
@@ -18,7 +19,11 @@ class OrganizationMigrationTests(TransactionTestCase):
         self.old.get_model('ledger','Organisation').objects.all().delete()
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.migrate_to)
+        # Restore to the newest ledger migration, not to the one this test
+        # asserts about. Stopping at 0006 left the schema without the columns the
+        # next test needs (the signup lifecycle ones), which failed elsewhere.
+        loader=MigrationLoader(connection)
+        MigrationExecutor(connection).migrate(loader.graph.leaf_nodes('ledger'))
         super().tearDown()
 
     def forward(self):

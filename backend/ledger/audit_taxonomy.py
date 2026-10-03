@@ -106,6 +106,8 @@ ACTIONS = {
     'organization.joined': Action('{subject} joined the organization', 'organization', 'notice', 'User',
                                   'An account joined the organization'),
     'organization.updated': Action('Organization settings were updated', 'organization', 'routine', 'Organisation'),
+    'organization.disabled': Action('The organization was disabled', 'organization', 'warning', 'Organisation',
+                                    'An organization was disabled'),
     'organization.left': Action('{subject} left the organization', 'organization', 'warning', 'User',
                                 'An account left the organization'),
     # --- Imports and exports -------------------------------------------------
@@ -124,21 +126,12 @@ ACTIONS = {
     'auth.password.change_failed': Action('A password change was rejected', 'security', 'warning'),
     'auth.password_reset.completed': Action('A password was reset', 'security', 'warning'),
     'auth.recovery.requested': Action('A password reset was requested', 'security', 'warning'),
-    # --- Signup verification --------------------------------------------------
-    # Written by the verification app, but labelled here for the same reason every
-    # other action is: the words on screen and the strings in the database are
-    # maintained in one place so they cannot disagree.
+    # --- Authentication, continued ---------------------------------------------
+    # Signup creates the account immediately and does not verify an email address,
+    # so the signup.* verification events are gone. What remains is the event for
+    # an authentication decision that had no organization to file under.
     'auth.no_tenant': Action('An authentication event had no organization to file under',
                              'security', 'warning', 'User'),
-    'signup.email_verified': Action('Signed up after verifying their email address',
-                                    'accounts', 'notice', 'User'),
-    'signup.verification_rejected': Action('An email verification was refused', 'security',
-                                           'warning', 'User',
-                                           'An email verification was refused'),
-    'signup.code_rejected': Action('A verification code was not accepted', 'security',
-                                   'warning', 'User',
-                                   'A verification code was not accepted'),
-    'signup.rejected': Action('A sign-up attempt was refused', 'security', 'warning'),
     'security.account_locked': Action('An account was locked after repeated failed sign-ins', 'security', 'critical'),
     'security.csrf.failure': Action('A request was blocked for a missing or invalid security token', 'security', 'critical'),
     'access.denied': Action('Access was denied', 'security', 'critical'),
@@ -188,14 +181,9 @@ REASON_LABELS = {
     'read_only_role': 'The account is read-only and cannot make changes.',
     'preview_expired': 'The file review had expired. Upload the file again.',
     'duplicate_file': 'This file has already been imported.',
-    # --- Signup verification --------------------------------------------------
-    # Written by the verification app, which has its own longer reason strings for
-    # the technical log. The audit row keeps the short form so the column stays a
-    # stable, readable vocabulary, and these are the reader-facing sentences for it.
-    'code rejected': 'The emailed code was not accepted.',
-    'account already exists': 'That email address is already in use here.',
     'inactive account': 'The account has been disabled.',
-    'no pending signup': 'There was no sign-up waiting to be verified.',
+    # --- Organization lifecycle -----------------------------------------------
+    'stale_onboarding': 'The organization was never set up after it was created.',
 }
 
 # Used when the stored reason is one this release does not recognize. Never the

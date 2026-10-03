@@ -1,11 +1,7 @@
-from datetime import timedelta
 from unittest.mock import patch, Mock
 from django.core.mail import EmailMessage
-from django.test import TestCase, SimpleTestCase, override_settings
-from django.utils import timezone
+from django.test import SimpleTestCase, override_settings
 from .email_backend import ResendEmailBackend, EmailDeliveryError
-from .maintenance import cleanup_expired
-from .models import PendingSignup
 
 
 @override_settings(RESEND_API_KEY='fake-test-key', EMAIL_TIMEOUT=5)
@@ -40,14 +36,3 @@ class EmailBackendTests(SimpleTestCase):
         with self.assertRaises(EmailDeliveryError):
             ResendEmailBackend().send_messages([EmailMessage('S', 'B', to=['a@example.com'])])
         post.assert_not_called()
-
-
-class CleanupTests(TestCase):
-    def test_cleanup_only_deletes_expired_pending_rows(self):
-        values = {'username':'test', 'organization_name':'Test', 'password_hash':'!'}
-        stale = PendingSignup.objects.create(email='stale@example.com', expires_at=timezone.now()-timedelta(seconds=1), **values)
-        fresh = PendingSignup.objects.create(email='fresh@example.com', expires_at=timezone.now()+timedelta(hours=1), **values)
-        self.assertEqual(cleanup_expired(), 1)
-        self.assertFalse(PendingSignup.objects.filter(pk=stale.pk).exists())
-        self.assertTrue(PendingSignup.objects.filter(pk=fresh.pk).exists())
-        self.assertEqual(cleanup_expired(), 0)

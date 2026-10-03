@@ -1,127 +1,104 @@
-"""A signup that exists only until the address is proven.
+"""Account-creation records: the email uniqueness authority and the rate limit.
 
-Creating the account and the organization is the irreversible part of signup:
-it produces financial records, an organization row and a membership that must
-never be orphaned. So nothing is created until the address has been proven. A
-``PendingSignup`` holds the submitted details, including a password hash but
-never a plaintext password, and the ordinary secretary-only signup logic runs
-only once a verification has succeeded and the whole thing commits or not at
-all.
+Signup creates a usable account immediately. Email ownership is not established
+at registration; password recovery is the account recovery mechanism. That is a
+deliberate tradeoff, recorded in AUTHENTICATION.md, and a better non-blocking
+verification is planned for a later phase.
 
-This table has no organization and no user. Until verification completes there
-is no tenant to own it, and inventing one would be a lie.
+Two small tables support that decision:
+
+* ``EmailClaim`` is the database authority for one account per address. Django's
+  ``User.email`` is not unique and the signup form's check is check-then-act, so
+  without this two concurrent requests could both create an account for the same
+  email.
+* ``SignupAttempt`` records account-creation requests for the sliding-hour rate
+  limit, since verification is gone and the only other signup throttle went with
+  it.
+
+Neither table carries an organization: an account-creation request has no tenant
+yet, and inventing one would be a lie.
 """
 import secrets
-from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
-from django.utils import timezone
-from django.utils.dateparse import parse_datetime
-
-PENDING_LIFETIME = 60 * 60 * 24          # 24 hours
-CODE_LIFETIME = 10 * 60                  # 10 minutes
-CODE_ATTEMPTS = 5                        # then the code is dead, request a new one
-RESEND_COOLDOWN = 60                     # seconds between sends
-SENDS_PER_HOUR = 5
-CODE = 'code'
 
 
 def new_token():
+    """A fresh unguessable value.
+
+    Retained only because the historical PendingSignup migration (0003)
+    serialises this function as a field default, so removing it would make an
+    already-applied migration unimportable. Nothing in the current flow calls it.
+    """
     return secrets.token_urlsafe(32)
 
 
-class PendingSignup(models.Model):
-    """A submitted signup waiting to have its email address proven.
+class EmailClaim(models.Model):
+    """The database authority that one address belongs to one account.
 
-    ``email`` is unique, so resubmitting for the same address replaces the
-    earlier attempt rather than accumulating duplicates.
+    ``email`` is stored stripped and lowercased. The signup form still performs a
+    friendly uniqueness check, but this row is what makes the rule true under
+    concurrency: two simultaneous signups for one address cannot both commit,
+    because the second INSERT violates the unique constraint.
+
+    There is no email-change flow. If one is ever added it must move this claim in
+    the same transaction as the User update, or the two would disagree.
     """
 
-    # The address to be proven, always lowercased so a later comparison cannot
-    # be defeated by differing case.
     email = models.EmailField(max_length=254, unique=True)
-    username = models.CharField(max_length=150)
-    organization_name = models.CharField(max_length=120)
-    # A hash, produced by make_password(). Never the submitted password.
-    password_hash = models.CharField(max_length=256)
-    # Organization colors, kept so branding survives the verification detour.
-    palette = models.JSONField(default=dict, blank=True)
-    # The decoded logo, so it does not expire with the 30-minute preview token.
-    logo = models.BinaryField(null=True, blank=True)
-    # hash() of the invitation token, so a pending invite-driven signup can be
-    # completed against the same invitation. Never the token itself.
-    invite_token_hash = models.CharField(max_length=64, blank=True, default='')
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                related_name='email_claim')
+    created_at = models.DateTimeField(auto_now_add=True)
 
-    # The unguessable handle used to find this row from the session. The primary
-    # key is never used as a handle and the email is never used in a URL.
-    token = models.CharField(max_length=64, default=new_token, db_index=True)
+    class Meta:
+        verbose_name = 'Email claim'
 
-    # The emailed code: a PBKDF2 hash, never the digits.
-    code_hash = models.CharField(max_length=256, blank=True, default='')
-    code_expires_at = models.DateTimeField(null=True, blank=True)
-    code_attempts = models.PositiveSmallIntegerField(default=0)
-    # Send timestamps, used for the resend cooldown and the hourly cap.
-    code_sends = models.JSONField(default=list, blank=True)
-    code_dead = models.BooleanField(default=False)
+    def __str__(self):
+        return self.email
 
-    # A completed signup deletes its row, so this only exists to say the attempt
-    # is no longer usable.
+
+class SignupAttempt(models.Model):
+    """One account-creation request, for the signup rate limit.
+
+    Tenantless, like ``AuthRejection``: the request has no account yet, so there
+    is no organization to file it under. Attempts are counted over a sliding
+    hour, separately per normalized email and per client IP. The IP is whatever
+    ``ledger.observability.client_ip`` resolved from ``REMOTE_ADDR``; a forwarded
+    header is never read.
+
+    This is a throughput control only. It is never the thing that makes an email
+    unique -- that is ``EmailClaim``.
+    """
+
+    # Normalized exactly as SignupForm.clean_email(): stripped and lowercased.
+    email = models.CharField(max_length=254, blank=True, default='')
+    ip = models.CharField(max_length=45, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
-    expires_at = models.DateTimeField()
-    verified_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-id']
-        verbose_name = 'Pending signup'
-
-    def __str__(self):
-        return f'PendingSignup {self.email}'
-
-    def expired(self):
-        return self.expires_at <= timezone.now()
-
-    def code_live(self):
-        """True when a code was sent and can still be entered correctly."""
-        return bool(self.code_hash) and not self.code_dead \
-            and self.code_expires_at and self.code_expires_at > timezone.now() \
-            and self.code_attempts < CODE_ATTEMPTS
-
-    def resend_wait(self):
-        """Seconds until both resend limits allow another email."""
-        import math
-        now = timezone.now()
-        stamps = sorted(t for t in map(parse_datetime, self.code_sends or [])
-                        if t and now - t < timedelta(hours=1))
-        deadlines = [now]
-        if stamps:
-            deadlines.append(stamps[-1] + timedelta(seconds=RESEND_COOLDOWN))
-        if len(stamps) >= SENDS_PER_HOUR:
-            deadlines.append(stamps[-SENDS_PER_HOUR] + timedelta(hours=1))
-        return max(0, math.ceil((max(deadlines) - now).total_seconds()))
-
-    def can_send_code(self):
-        """True when the cooldown and the hourly cap both allow another send."""
-        now = timezone.now()
-        stamps = sorted(t for t in map(parse_datetime, self.code_sends or []) if t)
-        if stamps and (now - stamps[-1]).total_seconds() < RESEND_COOLDOWN:
-            return False
-        # The cap is a sliding hour, so a send from 59 minutes ago still counts.
-        return len([t for t in stamps if now - t < timedelta(hours=1)]) < SENDS_PER_HOUR
+        verbose_name = 'Signup attempt'
+        indexes = [
+            models.Index(fields=['email', '-created_at'], name='signup_attempt_email'),
+            models.Index(fields=['ip', '-created_at'], name='signup_attempt_ip'),
+        ]
 
 
 class AuthRejection(models.Model):
-    """A refused verification or sign-in that no organization can own.
+    """A refused authentication event that no organization can own.
 
     ``ledger.AuditEvent`` requires an organization, and a rejected attempt by
-    someone who is not yet a user has no organization and must never be given
-    one. Those attempts are recorded here instead. This table is intentionally
-    global: it carries no tenant column, no tenant foreign key and no tenant
-    scoping, and nothing in the application reads it to authorize anything.
+    someone with no active membership has no organization and must never be
+    given one. Those attempts are recorded here instead. This table is
+    intentionally global: it carries no tenant column, no tenant foreign key and
+    no tenant scoping, and nothing in the application reads it to authorize
+    anything.
 
-    ``flow`` says which entry point the browser had started, so a refusal to
-    verify a signup address is never confused with a refusal to sign in.
-    ``method`` says how a signup address was being proven.
+    Signup no longer verifies an email address, so the verification refusals that
+    used to dominate this table are gone; what remains are refusals that resolve
+    to no membership. ``flow`` still says which entry point the browser had
+    started, and ``method`` is retained for historical rows.
 
     Rows hold the address involved, which is attacker-influenceable and may
     belong to a person who has no account here. Treat the table as confidential

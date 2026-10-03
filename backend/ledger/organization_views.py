@@ -3,8 +3,8 @@ import logging
 import secrets
 from datetime import timedelta
 from django.contrib.auth import logout
-from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.http import JsonResponse, HttpResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.utils import timezone
@@ -12,13 +12,15 @@ from django.views.decorators.http import require_GET, require_POST, require_http
 from django.core.validators import validate_email
 from .models import Organisation, UserAccess, SecretaryInvite
 from .access import organization_for, role_for
-from google_auth import flows as signup_flows, signup as signup_steps
+from google_auth import create as signup_create
+from google_auth.create import rate_limited, record_attempt
 
 logger = logging.getLogger(__name__)
-from .branding import DEFAULTS, branding_json, color, decode_logo, logo_token
+from .branding import DEFAULTS, branding_json, decode_logo, logo_token
 from .forms import SignupForm
+from .observability import client_ip
 from .services import audit
-from .views import api, body, READ_ONLY
+from .views import api, body, READ_ONLY, apply_organization_settings
 
 
 def token_hash(raw):
@@ -26,7 +28,7 @@ def token_hash(raw):
 
 
 def valid_invite(raw):
-    return SecretaryInvite.objects.select_related('organization').filter(token_hash=token_hash(raw), used_at__isnull=True, revoked_at__isnull=True, expires_at__gt=timezone.now()).first()
+    return SecretaryInvite.objects.select_related('organization').filter(token_hash=token_hash(raw), used_at__isnull=True, revoked_at__isnull=True, expires_at__gt=timezone.now(), organization__disabled_at__isnull=True).first()
 
 
 def preview_owner(request):
@@ -51,7 +53,9 @@ def logo_preview(request):
 @require_GET
 def logo(request, public_id):
     org = get_object_or_404(Organisation,public_id=public_id)
-    if not org.logo:return HttpResponse(status=404)
+    # A disabled organization is soft-hidden everywhere, and its logo is part of
+    # it: serving the image would keep the workspace visible after it was closed.
+    if org.disabled_at or not org.logo:return HttpResponse(status=404)
     response = HttpResponse(bytes(org.logo),content_type='image/png')
     response['X-Content-Type-Options']='nosniff'
     return response
@@ -72,77 +76,85 @@ PREVIEW_MEMBERS=(
 
 @require_http_methods(['GET','POST'])
 def signup(request):
+    """Step one: create the account, the organization and the membership.
+
+    The account is usable the moment this returns. Branding is a separate,
+    skippable step, so this page asks only for what the account needs. The
+    invitation, when there is one, travels in the query string and is posted back
+    with the form; nothing waits in the session for a later page.
+    """
     if request.user.is_authenticated:return redirect('/')
-    # "Wrong email, go back" on the verification page keeps the typed values,
-    # except the password, which is never held anywhere.
-    kept=request.session.pop(signup_flows.RETURN,None)
-    # The invitation is taken from the link, and otherwise from the session,
-    # which is how it survives a trip via the verification page. It is never
-    # trusted from a posted field.
-    token=request.GET.get('invite','') or (kept or {}).get('invite') or request.session.get(signup_flows.INVITE,'') or ''
+    token=request.GET.get('invite','')
     invite=valid_invite(token) if token else None
     if token and not invite:return render(request,'registration/invite_invalid.html',status=400)
-    initial={}
-    if kept:
-        initial={k:v for k,v in kept.items() if k not in ('invite','logo_token','palette') and v}
-    form=SignupForm(request.POST or None,initial=initial or None)
-    org_name=request.POST.get('organization_name','').strip() or (kept or {}).get('organization_name','')
-    logo_token=(request.POST.get('logo_token')
-               or request.session.get(signup_flows.LOGO,'') or (kept or {}).get('logo_token',''))
-    form_valid = form.is_valid() if request.method == 'POST' else False
-    if request.method == 'POST' and not form_valid and User.objects.filter(
-            email__iexact=request.POST.get('email', '').strip()).exists():
-        from google_auth.audit import record
-        record(request, 'signup.rejected', reason='account already exists',
-               email=request.POST.get('email', '').strip().lower(), flow='signup')
-    if request.method=='POST' and form_valid:
-        # Validate exactly as before, then create nothing. The user, the
-        # organization and the membership are created only once the address has
-        # been proven; see google_auth.signup.complete.
+    form=SignupForm(request.POST or None)
+    org_name=request.POST.get('organization_name','').strip()
+    if request.method=='POST' and form.is_valid():
+        email=form.cleaned_data['email']
+        ip=client_ip(request)
+        if rate_limited(email,ip):
+            # A throughput refusal, stated plainly and without hinting whether the
+            # address exists. The attempt is not recorded, so a blocked visitor is
+            # not kept blocked by their own retries.
+            return render(request,'registration/signup.html',
+                          {'form':form,'invite':invite,'invite_token':token,
+                           'organization_name':org_name,'limited':True},status=429)
+        record_attempt(email,ip)
         try:
-            if not token and not org_name:raise ValueError('Enter an organization name.')
-            if not token:
-                Organisation._meta.get_field('name').clean(org_name, None)
-            if token:
-                # Nothing is created here, so this is only a friendly check to
-                # stop somebody typing a wrong address. The invitation is locked
-                # and rechecked for real in google_auth.signup.complete.
-                locked=valid_invite(token)
-                if locked is None:
-                    raise ValueError('This invitation is no longer valid.')
-                if form.cleaned_data['email'].casefold()!=locked.email.casefold():
-                    raise ValueError('Use the email address named in your invitation.')
-            palette=dict((kept or {}).get('palette') or {})
-            for field,default in DEFAULTS.items():
-                palette[field]=color(request.POST.get(field) or palette.get(field,default))
-        except (ValueError,ValidationError) as error:
+            signup_create.create(request,username=form.cleaned_data['username'],email=email,
+                                 password=form.cleaned_data['password1'],
+                                 organization_name=org_name,invite_token=token)
+        except signup_create.Invalid as error:
             form.add_error(None,str(error))
         else:
-            pending,problem=signup_steps.create(request,form,org_name,invite_token=token,
-                palette=palette,logo_token=logo_token)
-            if problem:form.add_error(None,problem)
-            else:
-                # Nothing exists but a pending signup and the email we are about
-                # to send. Sign in happens here only after verification.
-                signup_flows.begin_signup(request,pending.token)
-                # The pending signup keeps only the invitation's hash and the
-                # decoded logo, so both are held here to survive "wrong email,
-                # go back".
-                request.session[signup_flows.INVITE]=token
-                request.session[signup_flows.LOGO]=logo_token
-                problem=signup_steps.send_code(request,pending)
-                if problem:request.session[signup_flows.SIGNUP_ERROR]=problem
-                else:request.session['verify_code_sent']=True
-                return redirect('/signup/verify/')
-    context={
-        'form':form,'invite':invite,'invite_token':token,'organization_name':org_name,
-        'palette':{k:request.POST.get(k,(kept or {}).get('palette',{}).get(k,v)) for k,v in DEFAULTS.items()},
-        'logo_token':logo_token,
-        'preview_members':PREVIEW_MEMBERS}
+            # A new organization still needs its branding; a join does not.
+            return redirect('/overview/' if token else '/signup/branding/')
+    context={'form':form,'invite':invite,'invite_token':token,'organization_name':org_name}
     # An invitation brings its organization with it, so the card is shown in that
     # organization's colors and logo.
     if invite:context.update(organisation=invite.organization,branding=branding_json(invite.organization))
     return render(request,'registration/signup.html',context)
+
+
+def finish_onboarding(org):
+    """Mark the guided first run complete, once, without re-creating anything."""
+    org.onboarded_at=timezone.now()
+    org.onboarding_required=False
+    org.save(update_fields=['onboarded_at','onboarding_required'])
+
+
+@require_http_methods(['GET','POST'])
+def signup_branding(request):
+    """Step two: name and colours, which are entirely skippable.
+
+    Only the organization that still requires onboarding reaches this page, and
+    only a secretary can change branding. Saving goes through the same helper the
+    settings endpoint uses, so the two write paths cannot disagree; the browser
+    enhancer posts the same payload to /api/settings/ and then asks here to
+    finish, and this page's own POST is the no-JavaScript fallback.
+    """
+    if not request.user.is_authenticated:return redirect('/login/')
+    org=organization_for(request.user)
+    if org is None or role_for(request.user)!='secretary' or not org.onboarding_required or org.onboarded_at:
+        return redirect('/overview/')
+    error=''
+    if request.method=='POST':
+        if request.POST.get('action') in ('skip','finish'):
+            finish_onboarding(org)
+            return redirect('/overview/')
+        try:
+            with transaction.atomic():
+                apply_organization_settings(org,request.POST,f'org:{org.pk}')
+                audit(request.user,'organization.updated',org,{'name':org.name})
+        except (ValueError,ValidationError) as exc:
+            error=str(exc)
+        else:
+            finish_onboarding(org)
+            return redirect('/overview/')
+    return render(request,'registration/branding.html',{
+        'organisation':org,'branding':branding_json(org),
+        'palette':{k:getattr(org,k) for k in DEFAULTS},
+        'preview_members':PREVIEW_MEMBERS,'error':error})
 
 
 @api
