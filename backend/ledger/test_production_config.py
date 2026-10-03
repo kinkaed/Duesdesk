@@ -67,6 +67,9 @@ class ProductionConfigFailsClosedTests(SimpleTestCase):
             else:
                 configured[key] = value
         env.update(configured)
+        # Ignore any developer's backend/.env: a value under test that this case
+        # removes must not be quietly restored from the file.
+        env['DJANGO_DOTENV'] = ''
         return subprocess.run([sys.executable, '-c', PROBE], cwd=BACKEND,
                               capture_output=True, text=True, env=env, timeout=120)
 
