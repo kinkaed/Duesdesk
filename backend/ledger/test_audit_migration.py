@@ -6,6 +6,7 @@ that already exist when the migration runs. A model-level test cannot see that.
 """
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.loader import MigrationLoader
 from django.test import TransactionTestCase
 
 # The names the application used before they were normalised. If one of these is
@@ -26,7 +27,10 @@ class AuditEventMigrationTests(TransactionTestCase):
         self.old.get_model('ledger', 'AuditEvent').objects.all().delete()
 
     def tearDown(self):
-        MigrationExecutor(connection).migrate(self.migrate_to)
+        # Restore the newest ledger migration, not the one under test: leaving the
+        # schema at 0008 would deny the next test the columns 0009 adds.
+        loader = MigrationLoader(connection)
+        MigrationExecutor(connection).migrate(loader.graph.leaf_nodes('ledger'))
         super().tearDown()
 
     def forward(self):

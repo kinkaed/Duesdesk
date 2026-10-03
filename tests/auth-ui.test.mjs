@@ -5,7 +5,7 @@ import fs from 'node:fs';
 const read = path => fs.readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
 const authUi = read('backend/static/auth-ui.js');
-const signupJs = read('backend/static/signup.js');
+const brandingJs = read('backend/static/signup-branding.js');
 const themeJs = read('backend/static/theme.js');
 const reactPage = read('backend/templates/react.html');
 const workTsx = read('work.tsx');
@@ -13,6 +13,9 @@ const css = read('backend/static/app.css');
 const settings = read('backend/config/settings.py');
 const loginPage = read('backend/templates/registration/login.html');
 const signupPage = read('backend/templates/registration/signup.html');
+// The first-run flow has two server-rendered steps: the account form, then the
+// branding step where the theme preview lives.
+const brandingPage = read('backend/templates/registration/branding.html');
 // One template serves change-password, the reset request and the reset link.
 const accountForm = read('backend/templates/registration/account_form.html');
 
@@ -107,12 +110,14 @@ test('each auth submit button carries a busy label', () => {
   }
 });
 
-test('the sign-up page loads the stylesheets the preview needs, in order', () => {
-  // The preview is drawn by the application stylesheet, which declares bare
-  // elements and shared class names, so the isolation sheet has to load after it.
-  // A literal name is used rather than a context variable because verify_static
-  // reads these tags to decide what must be collected.
-  const sheets = [...signupPage.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map(m => m[1]);
+test('the branding page loads the stylesheets the preview needs, in order', () => {
+  // The preview moved to the first-run branding step, which is the only
+  // server-rendered page that paints a workspace. It is drawn by the application
+  // stylesheet, which declares bare elements and shared class names, so the
+  // isolation sheet has to load after it. A literal name is used rather than a
+  // context variable because verify_static reads these tags to decide what must
+  // be collected.
+  const sheets = [...brandingPage.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map(m => m[1]);
   assert.ok(sheets.includes("{% static 'app/style.css' %}"),
     'the application stylesheet must be loaded');
   assert.ok(sheets.includes("{% static 'theme-preview.css' %}"),
@@ -149,22 +154,29 @@ test('the React Settings preview no longer computes contrast itself', () => {
     'work.tsx must read contrast through the bridge');
 });
 
-test('the signup theme preview themes the whole page, not only the box', () => {
+test('the branding theme preview themes the whole page, not only the box', () => {
       // The variables are now written by theme.applyTheme rather than inline, so
       // that the browser and the server cannot disagree about what makes a
       // colour readable. What matters here is that the preview still drives the
       // page as a whole, and that the only thing doing the writing is the module
       // both sides share.
-      assert.match(signupJs, /applyTheme\(document\.documentElement/,
+      assert.match(brandingJs, /applyTheme\(document\.documentElement/,
         'the preview must set variables on the root element');
-      assert.doesNotMatch(signupJs, /setProperty\(/,
-        'signup.js must not write --org-* variables itself');
-      assert.doesNotMatch(signupJs, /luminance|0\.2126|0\.7152/,
-        'signup.js must not restate the contrast maths');
+      assert.doesNotMatch(brandingJs, /setProperty\(/,
+        'signup-branding.js must not write --org-* variables itself');
+      assert.doesNotMatch(brandingJs, /luminance|0\.2126|0\.7152/,
+        'signup-branding.js must not restate the contrast maths');
       assert.match(themeJs, /setProperty\(`--org-/,
         'theme.js must be what writes the --org-* variables');
       assert.match(themeJs, /applyTheme/,
-        'theme.js must export the function signup.js calls');
+        'theme.js must export the function signup-branding.js calls');
+      // theme.js is a classic script and signup-branding.js defers, so placing
+      // theme.js first is what guarantees window.DuesdeskTheme exists.
+      const classic = brandingPage.indexOf("<script src=\"{% static 'theme.js' %}\"");
+      const enhancer = brandingPage.indexOf("{% static 'signup-branding.js' %}");
+      assert.ok(classic > -1, 'branding.html must load theme.js');
+      assert.ok(enhancer > -1, 'branding.html must load signup-branding.js');
+      assert.ok(classic < enhancer, 'theme.js must load before signup-branding.js');
     });
 
 test('the stylesheet styles the toggle, the rule list and the hidden state', () => {

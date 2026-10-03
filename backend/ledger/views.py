@@ -392,14 +392,24 @@ def organisation_settings(request):
     item=organization_for(request.user)
     if request.method=='POST':
         with transaction.atomic():
-            data=body(request)
-            item.name=str(data.get('name',item.name)).strip();item.contact=str(data.get('contact',item.contact)).strip();item.receipt_footer=str(data.get('receipt_footer',item.receipt_footer)).strip()
-            for field in ('primary','secondary','accent'):
-                if field in data:setattr(item,field,color(data[field]))
-            if data.get('logo_token'):item.logo=read_logo_token(data['logo_token'],f'org:{item.pk}')
-            if data.get('remove_logo'):item.logo=b''
-            item.full_clean();item.save();audit(request.user,'organization.updated',item,{'name':item.name})
+            apply_organization_settings(item,body(request),f'org:{item.pk}')
+            audit(request.user,'organization.updated',item,{'name':item.name})
     return JsonResponse({**branding_json(item),'name':item.name,'contact':item.contact,'receipt_footer':item.receipt_footer})
+
+def apply_organization_settings(item,data,logo_owner):
+    """Apply a settings payload to one organization and save it.
+
+    Does not open a transaction: the caller already holds the organization lock
+    and wraps this in an atomic block. Shared by the settings endpoint and the
+    post-signup branding step so the two cannot drift on what saving the branding
+    means.
+    """
+    item.name=str(data.get('name',item.name)).strip();item.contact=str(data.get('contact',item.contact)).strip();item.receipt_footer=str(data.get('receipt_footer',item.receipt_footer)).strip()
+    for field in ('primary','secondary','accent'):
+        if field in data:setattr(item,field,color(data[field]))
+    if data.get('logo_token'):item.logo=read_logo_token(data['logo_token'],logo_owner)
+    if data.get('remove_logo'):item.logo=b''
+    item.full_clean();item.save()
 
 def _audit_page(value):
     """Read the page number, or return None when the request is not asking for a page.
@@ -716,15 +726,20 @@ def accounts(request):
         # and avoids one membership() query per account.
         return JsonResponse({'users':[{'id':u.pk,'username':u.username,'email':u.email,'role':u.access.role,'active':u.is_active and u.access.active} for u in User.objects.filter(access__organization=organization_for(request.user)).select_related('access').order_by('username')]})
     data=body(request)
+    from google_auth.models import EmailClaim
     with transaction.atomic():
         user=User(username=str(data.get('username','')).strip(),email=str(data.get('email','')).strip())
         if not user.email:raise ValueError('Email is required for account recovery.')
-        if User.objects.filter(email__iexact=user.email).exists():raise ValueError('An account already uses this email.')
+        # EmailClaim is the database authority for one account per address; the
+        # User check catches accounts created before the claim table existed.
+        claimed=user.email.strip().lower()
+        if EmailClaim.objects.filter(email=claimed).exists() or User.objects.filter(email__iexact=user.email).exists():raise ValueError('An account already uses this email.')
         role=data.get('role')
         if role == 'secretary':raise ValueError('Use Invite Secretary to add a secretary.')
         if role != 'auditor':raise ValueError('Choose a valid role.')
         password=data.get('password','');validate_password(password,user)
         user.set_password(password);user.full_clean();user.save()
+        EmailClaim.objects.create(email=claimed,user=user)
         access=UserAccess(organization=organization_for(request.user),user=user,role=role);access.full_clean();access.save()
         audit(request.user,'account.created',user,{'role':role})
     return JsonResponse({'id':user.pk,'username':user.username},status=201)

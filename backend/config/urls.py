@@ -1,6 +1,5 @@
 from django.contrib.auth import views as auth
 from django.urls import path
-from google_auth import views as verification_views
 from google_auth.forms import AccountRecoveryForm, GuardedAuthenticationForm
 from ledger import views, organization_views as org_views
 from ledger.auth_views import (
@@ -12,7 +11,6 @@ from ledger.auth_views import (
 )
 
 urlpatterns = [
-    path('signup/verify/', verification_views.verify, name='verify_email'),
     path('', views.home),
     # Every page of the application is the same shell, reached by its own path so
     # the address bar identifies the page and the back button steps between pages.
@@ -30,6 +28,7 @@ urlpatterns = [
     path('login/', AuditableLoginView.as_view(authentication_form=GuardedAuthenticationForm), name='login'),
     path('logout/', AuditableLogoutView.as_view()),
     path('signup/', org_views.signup, name='signup'),
+    path('signup/branding/', org_views.signup_branding, name='signup_branding'),
     path('account/password/', AuditablePasswordChangeView.as_view(template_name='registration/account_form.html', success_url='/account/password/done/', extra_context={'heading':'Change your password','button':'Save new password'}), name='password_change'),
     path('account/password/done/', auth.PasswordChangeDoneView.as_view(template_name='registration/account_done.html', extra_context={'heading':'Password changed','description':'Your new password is ready to use.'}), name='password_change_done'),
     path('account/reset/', AuditableRecoveryView.as_view(form_class=AccountRecoveryForm), name='password_reset'),

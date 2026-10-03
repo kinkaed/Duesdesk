@@ -14,7 +14,7 @@ from openpyxl import load_workbook
 from .models import Organisation, UserAccess, Member, Payment, Allocation, DuesMonth, SecretaryInvite, ImportBatch
 from .services import record_payment
 from .branding import decode_logo, text_color, luminance, branding_json, DEFAULTS
-from google_auth.models import PendingSignup
+from google_auth.models import EmailClaim
 from google_auth.testsupport import SignupTestMixin
 
 STORAGES={'default':{'BACKEND':'django.core.files.storage.FileSystemStorage'},'staticfiles':{'BACKEND':'django.contrib.staticfiles.storage.StaticFilesStorage'}}
@@ -100,7 +100,6 @@ class OrganizationTests(SignupTestMixin, TestCase):
         # submission and never reaches verification.
         wrong=visitor.post('/signup/?invite='+token,self.signup_data('wrong@example.com'))
         self.assertContains(wrong,'Use the email address')
-        self.assertFalse(PendingSignup.objects.exists())
         self.assertFalse(User.objects.filter(username='new-secretary').exists())
         self.assertEqual(self.code_signup(visitor,self.signup_data(),token).status_code,302)
         user=User.objects.get(username='new-secretary')
@@ -128,6 +127,15 @@ class OrganizationTests(SignupTestMixin, TestCase):
         self.assertNotIn(user.access.organization_id,[self.a.pk,self.b.pk])
         self.assertEqual(visitor.get('/api/members/').json()['members'],[])
         self.assertEqual(user.access.organization.name,'New independent organization')
+
+    def test_created_auditor_is_claimed_and_cannot_reuse_the_address(self):
+        first=self.post('/api/accounts/',{'username':'aud1','email':'aud1@example.com','password':'An-Excellent-Private-Phrase!','role':'auditor'})
+        self.assertEqual(first.status_code,201,first.content)
+        user=User.objects.get(username='aud1')
+        self.assertEqual(EmailClaim.objects.get(user=user).email,'aud1@example.com')
+        second=self.post('/api/accounts/',{'username':'aud2','email':'AUD1@example.com','password':'An-Excellent-Private-Phrase!','role':'auditor'})
+        self.assertEqual(second.status_code,400,second.content)
+        self.assertFalse(User.objects.filter(username='aud2').exists())
 
     def test_leave_requires_active_successor_and_revokes_sessions(self):
         self.assertEqual(self.post('/api/organization/leave/').status_code,400)
@@ -224,13 +232,6 @@ class OrganizationTests(SignupTestMixin, TestCase):
         for color in ['#ffffff','#000000']:
             raw,palette=decode_logo(self.image(color));self.assertTrue(raw.startswith(b'\x89PNG'))
             self.assertEqual(palette['primary'],color)
-
-    def test_anonymous_logo_preview_binds_to_signup_session(self):
-        visitor=Client();data=visitor.post('/api/branding/preview/',{'logo':self.image()}).json()
-        response=self.code_signup(visitor,{**self.signup_data(),**data})
-        self.assertEqual(response.status_code,302,response.content)
-        user=User.objects.get(username='new-secretary');self.assertTrue(user.access.organization.logo)
-        self.assertEqual(user.access.organization.primary,'#cc2244')
 
     def test_expired_logo_token_is_rejected(self):
         import time

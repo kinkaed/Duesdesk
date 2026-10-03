@@ -54,7 +54,12 @@ def revoke_sessions(user):
 def membership(user):
     if not user.is_authenticated or not user.is_active:
         return None
-    return UserAccess.objects.select_related('organization').filter(user=user, active=True).first()
+    # A disabled organization resolves to no membership, which is what makes every
+    # tenant query and endpoint refuse it at once: organization_for, role_for,
+    # visible_members and visible_payments all go through here. The audit rows and
+    # the membership row itself are left in place, so the history survives.
+    return UserAccess.objects.select_related('organization').filter(
+        user=user, active=True, organization__disabled_at__isnull=True).first()
 
 
 def organization_for(user):

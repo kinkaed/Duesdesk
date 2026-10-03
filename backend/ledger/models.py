@@ -116,6 +116,21 @@ class Organisation(models.Model):
     contact = models.CharField(max_length=200, blank=True)
     receipt_footer = models.CharField(max_length=250, default='Thank you for your contribution.')
 
+    # Onboarding is the guided first-run (organization name, effectively chosen at
+    # signup, and the skippable branding step). It is deliberately separate from
+    # "when the organization was created": backfilling this for organizations that
+    # predate the flow would claim they completed something they never saw.
+    # onboarding_required is set only by the immediate-creation signup, so a legacy
+    # organization is False/NULL and is never treated as an abandoned signup.
+    onboarding_required = models.BooleanField(default=False)
+    onboarded_at = models.DateTimeField(null=True, blank=True)
+
+    # A soft lifecycle stop. Never a hard delete: AuditEvent.organization and
+    # UserAccess.organization are PROTECT, so an organization with history cannot
+    # be removed. A disabled organization resolves to no membership, so every
+    # tenant query and endpoint refuses it, while the audit rows remain.
+    disabled_at = models.DateTimeField(null=True, blank=True)
+
 class AuditEventQuerySet(models.QuerySet):
     """Audit rows are evidence, so they can be appended but never rewritten.
 

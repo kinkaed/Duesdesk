@@ -20,16 +20,18 @@ Vite 7 SPA is served from `STATIC_ROOT` under `BASE=/static/app/`.
   Roles are `secretary` and `auditor`. Members are *records*, not accounts.
 - **Money:** `Payment` → `Allocation[]` → `DuesMonth`. Balances are derived from allocations.
 - **Tenancy:** enforced by `organization_for()` / `membership()` in `backend/ledger/access.py`.
-- **Auth methods:** password only (Axes-throttled), plus emailed verification codes for
-  signup. The external identity provider that used to exist has been removed; see
-  [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md).
+- **Auth methods:** password only (Axes-throttled). Signup creates the account
+  immediately and proves no address; password recovery proves it later. The external
+  identity provider that used to exist has been removed; see
+  [`DESIGN-EXTERNAL-IDENTITY-REMOVAL.md`](DESIGN-EXTERNAL-IDENTITY-REMOVAL.md) and
+  [`DESIGN-SIGNUP-VERIFICATION.md`](DESIGN-SIGNUP-VERIFICATION.md).
 - **Deployment:** Render web service, Neon PostgreSQL, `preDeployCommand` runs `migrate` +
   `deployment_check`.
 
 Trust boundaries that matter: unauthenticated internet → session establishment (login,
 signup, password reset); secretary → organization-wide financial writes; auditor →
-read-only. Login and password recovery are now the only unauthenticated paths that
-grant an existing account's privileges, and both are password- or code-based.
+  read-only. Login and password recovery are now the only unauthenticated paths that
+  grant an existing account's privileges, and both are password-based.
 
 ---
 
@@ -365,7 +367,7 @@ repo (H18, H19).
 **Later — deliberate, larger**
 7. F4: decide whether allocation symmetry needs a stronger guarantee than a management command.
 8. H19: add error tracking and an alert on `/health/` and on error-rate in logs.
-9. CSP `style-src 'unsafe-inline'` is load-bearing (`work.tsx` inline styles, `theme.js`/`signup.js`
+9. CSP `style-src 'unsafe-inline'` is load-bearing (`work.tsx` inline styles, `theme.js`/`signup-branding.js`
    `setProperty`, Django-injected branding CSS). Removing it is a coordinated refactor, not a
    header change.
 
