@@ -42,6 +42,8 @@ From `render.yaml`, the blueprint is authoritative:
 | Setting | Value |
 | --- | --- |
 | `runtime` | `python` |
+| `branch` | `main` (pinned in `render.yaml`) |
+| `autoDeployTrigger` | `commit` (redeploy on every push to `main`) |
 | `buildCommand` | pip install lock, pnpm install/build, `findstatic`, `collectstatic`, `verify_static` |
 | `preDeployCommand` | `migrate --noinput` then `deployment_check` |
 | `startCommand` | `cd backend && python serve.py` |
@@ -188,6 +190,7 @@ forward fix; do not assume the rollback is sufficient.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| Merged to `main` but prod still serves old code; no deploy appears for the merge | the service builds a different branch. A Blueprint applied from a feature branch makes its services inherit **that** branch, so `main` is never built | set the service's branch to `main` (or change the Blueprint's branch and re-sync), then **Deploy latest commit**; confirm the deploy log names the commit that `git rev-parse origin/main` reports |
 | `ImproperlyConfigured: ALLOWED_HOSTS is required in production` | variable missing or empty on the service | set it to the served hostname; `*` is refused |
 | `ImproperlyConfigured: CSRF_TRUSTED_ORIGINS is required in production` | no origin and no `RENDER_EXTERNAL_HOSTNAME` | set the origin, or confirm the service is a web service |
 | `APP_ENV must be exactly one of ...` | typo, or a value other than `local`/`test`/`production` | set exactly `production` |

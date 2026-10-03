@@ -5,6 +5,14 @@ services:
     plan: starter
     rootDir: .
     region: frankfurt
+    # Pin the branch explicitly. Omitted, a service that uses the same repo as
+    # the Blueprint inherits the *Blueprint's* branch, not the repo default, so
+    # applying the Blueprint from a feature branch silently deploys that branch
+    # and merges to `main` never reach production.
+    branch: main
+    # Redeploy on every commit to that branch. `autoDeployTrigger` is the current
+    # field; `autoDeploy` is its deprecated alias.
+    autoDeployTrigger: commit
     healthCheckPath: /health/
     buildCommand: python -m pip install -r backend/requirements.lock && npx --yes pnpm@11.19.0 install --frozen-lockfile && npx --yes pnpm@11.19.0 run build && python backend/manage.py findstatic app.css --verbosity 2 && python backend/manage.py collectstatic --noinput --verbosity 2 && python backend/manage.py verify_static
     preDeployCommand: python backend/manage.py migrate --noinput && python backend/manage.py deployment_check
