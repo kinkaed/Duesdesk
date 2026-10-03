@@ -8,7 +8,13 @@ from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / '.env', override=False)
+# A developer keeps local values in backend/.env (see .env.example). Point
+# DJANGO_DOTENV at another path, or set it to the empty string to load nothing,
+# so a hermetic entry point — the fail-closed configuration tests, a CI runner —
+# is not satisfied by whatever .env happens to sit next to this file.
+_dotenv_path = os.environ.get('DJANGO_DOTENV', str(BASE_DIR / '.env'))
+if _dotenv_path:
+    load_dotenv(_dotenv_path, override=False)
 
 # APP_ENV is the single switch that decides whether this process runs with
 # production security, and it is compared against 'production' exactly. That
