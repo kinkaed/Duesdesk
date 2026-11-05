@@ -25,7 +25,9 @@ export type AuditActor={username:string;role:Role};
 export type AuditPage={events:AuditEvent[];page:number;has_more:boolean;page_size:number;actors:AuditActor[];taxonomy:AuditTaxonomy;total?:number};
 export const AUDIT_PAGE_SIZE=100;
 export const money=(n:string|number)=>'GH₵'+Number(n).toLocaleString('en-GH',{minimumFractionDigits:2,maximumFractionDigits:2});
-export const csrf=()=>decodeURIComponent(document.cookie.split('; ').find(x=>x.startsWith('csrftoken='))?.split('=')[1]||'');
+// Django renders the correct masked token regardless of the cookie name.
+// The cookie fallback supports the standalone Vite development shell.
+export const csrf=()=>document.querySelector<HTMLInputElement>('input[name="csrfmiddlewaretoken"]')?.value||decodeURIComponent(document.cookie.split('; ').find(x=>x.startsWith('csrftoken='))?.split('=')[1]||'');
 export async function api<T>(url:string,data?:unknown):Promise<T>{
  const response=await fetch(url,{credentials:'same-origin',...(data!==undefined?{method:'POST',headers:{'Content-Type':'application/json','X-CSRFToken':csrf()},body:JSON.stringify(data)}:{})});
  if(response.status===401){location.assign('/login/');throw Error('Please sign in again.');}

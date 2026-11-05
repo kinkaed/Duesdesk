@@ -4,7 +4,7 @@ import { api, signOut } from '../api.ts';
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; delete globalThis.document; delete globalThis.location; });
 test('successful response and CSRF on writes', async () => {
- globalThis.document = { cookie: 'csrftoken=release-token' };
+ globalThis.document = { querySelector: () => null, cookie: 'csrftoken=release-token' };
  globalThis.fetch = async (url, options) => {
   assert.equal(options.headers['X-CSRFToken'], 'release-token');
   assert.equal(options.credentials, 'same-origin');
@@ -34,7 +34,7 @@ test('validation and permission errors remain visible', async () => {
  await assert.rejects(api('/api/overview/'), /permission/);
 });
 test('sign out posts to the Django logout view and returns to login', async () => {
- globalThis.document = { cookie: 'csrftoken=signout-token' };
+ globalThis.document = { querySelector: () => null, cookie: 'csrftoken=signout-token' };
  let target, called = '';
  globalThis.location = {assign: value => {target = value;}};
  globalThis.fetch = async (url, options) => {
@@ -50,7 +50,7 @@ test('sign out posts to the Django logout view and returns to login', async () =
 });
 test('a rejected sign out does not pretend the session ended', async () => {
  let navigated = false;
- globalThis.document = { cookie: 'csrftoken=signout-token' };
+ globalThis.document = { querySelector: () => null, cookie: 'csrftoken=signout-token' };
  globalThis.location = {assign: () => {navigated = true;}};
  globalThis.fetch = async () => new Response('', {status:403});
  await assert.rejects(signOut(), /did not complete/);
@@ -58,9 +58,25 @@ test('a rejected sign out does not pretend the session ended', async () => {
 });
 test('an unreachable server does not pretend the session ended', async () => {
  let navigated = false;
- globalThis.document = { cookie: 'csrftoken=signout-token' };
+ globalThis.document = { querySelector: () => null, cookie: 'csrftoken=signout-token' };
  globalThis.location = {assign: () => {navigated = true;}};
  globalThis.fetch = async () => {throw new TypeError('Failed to fetch');};
  await assert.rejects(signOut(), /could not reach the server/);
  assert.equal(navigated, false, 'must not navigate away while the session is still live');
+});
+
+
+test('writes use the rendered token with custom staging cookies, ignoring stale default cookies', async () => {
+ globalThis.document = {
+  cookie: 'csrftoken=stale-other-app; duesdesk_staging_csrf=staging-secret',
+  querySelector: selector => {
+   assert.equal(selector, 'input[name="csrfmiddlewaretoken"]');
+   return { value: 'masked-staging-token' };
+  },
+ };
+ globalThis.fetch = async (url, options) => {
+  assert.equal(options.headers['X-CSRFToken'], 'masked-staging-token');
+  return { status: 200, ok: true, json: async () => ({ saved: true }) };
+ };
+ assert.deepEqual(await api('/api/members/', { name: 'Test member' }), { saved: true });
 });
