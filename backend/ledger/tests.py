@@ -45,8 +45,44 @@ class PaymentTests(TestCase):
         for value in ['0','-1','NaN','Infinity','25.001','3001','x']:
             with self.assertRaises(ValueError): parse_amount(value)
 
-    def test_pre_join_and_inactive_rejected(self):
-        with self.assertRaises(ValueError): plan_payment(self.member,Decimal('25'),date(2025,12,1))
+    def test_historical_first_payment_preview_save_receipt_and_report(self):
+        import io
+        from openpyxl import load_workbook
+        self.member.joined=date(2026,11,1); self.member.save()
+        self.client.force_login(self.user)
+        payload={**self.payload,'start_month':'2026-10','payment_date':'2026-11-01'}
+        preview=self.client.post('/api/payments/preview/',payload,content_type='application/json')
+        self.assertEqual(preview.status_code,200)
+        self.assertEqual(preview.json()['allocations'][0]['month'],'October 2026')
+        saved=self.client.post('/api/payments/',payload,content_type='application/json')
+        self.assertEqual(saved.status_code,201,saved.content)
+        payment=Payment.objects.get(pk=saved.json()['id'])
+        self.assertEqual(payment.payment_date,date(2026,11,1))
+        self.assertEqual(payment.allocations.count(),4)
+        self.member.refresh_from_db()
+        self.assertEqual(self.member.joined,date(2026,11,1))
+        self.assertContains(self.client.get(f'/receipts/{payment.pk}/'),'October 2026')
+        from .views import member_rows
+        row=next(r for r in member_rows(date(2026,10,1),self.user) if r['id']==self.member.pk)
+        self.assertEqual(row['status'],'Paid')
+        report=self.client.get(f'/api/members/{self.member.pk}/report/?month=2026-11')
+        self.assertEqual(report.status_code,200)
+        book=load_workbook(io.BytesIO(report.content))
+        self.assertEqual(book['Monthly balances']['A2'].value,'October 2026')
+        self.assertEqual(book['Monthly balances']['C2'].value,25)
+
+    def test_historical_partial_payment_and_top_up(self):
+        self.member.joined=date(2026,11,1); self.member.save()
+        payload={**self.payload,'amount':'10','start_month':'2026-10','payment_date':'2026-11-01'}
+        record_payment(payload,self.user)
+        from .views import member_rows
+        row=next(r for r in member_rows(date(2026,10,1),self.user) if r['id']==self.member.pk)
+        self.assertEqual(row['status'],'Partial')
+        self.assertEqual(Decimal(row['balance']),Decimal('15'))
+        plan=plan_payment(self.member,Decimal('40'),date(2026,10,1))
+        self.assertEqual([p['amount'] for p in plan],[Decimal('15'),Decimal('25')])
+
+    def test_inactive_rejected(self):
         self.member.status='Inactive';self.member.save()
         with self.assertRaises(ValueError):record_payment(self.payload,self.user)
         self.assertEqual(Payment.objects.count(),0)

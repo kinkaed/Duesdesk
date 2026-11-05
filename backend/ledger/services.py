@@ -139,8 +139,6 @@ def parse_amount(value):
 def plan_payment(member, amount, month):
     if member.status != 'Active':
         raise ValueError('Only active members can receive a new payment.')
-    if month < member.joined.replace(day=1):
-        raise ValueError('The covered period cannot begin before the member joined.')
     paid = dict(Allocation.objects.filter(organization=member.organization, payment__member=member, payment__voided_at__isnull=True, dues_month__month__gte=month).values('dues_month__month').annotate(total=Sum('amount')).values_list('dues_month__month', 'total'))
     rates = dict(DuesMonth.objects.filter(organization=member.organization, month__gte=month).values_list('month', 'amount_due'))
     remaining = amount

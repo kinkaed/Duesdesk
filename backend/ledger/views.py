@@ -191,11 +191,14 @@ def member_rows(month, user):
     rows = []
     for person in people:
         start = person.joined.replace(day=1)
-        applicable = start <= month and (not person.billing_end or month <= person.billing_end)
+        applicable = (start <= month or (person.pk, month) in paid) and (not person.billing_end or month <= person.billing_end)
         amount = paid.get((person.pk, month), Decimal('0'))
         balance = max(Decimal('0'), rates.get((person.organization_id,month),RATE) - amount) if applicable else Decimal('0')
         status = ('Paid' if balance == 0 else 'Partial' if amount else 'Unpaid') if applicable else 'Not due'
-        arrears = Decimal('0')
+        # Earlier explicitly covered months count; do not invent unpaid months
+        # before joining merely because a historical payment was entered.
+        arrears = sum((max(Decimal('0'), rates.get((person.organization_id, m), RATE) - value)
+                       for (pk, m), value in paid.items() if pk == person.pk and m < start), Decimal('0'))
         cursor = start
         last = min(month, person.billing_end) if person.billing_end else month
         while cursor <= last:
@@ -931,10 +934,14 @@ def member_report(request, pk):
     rates = dict(DuesMonth.objects.filter(organization=member.organization).values_list('month', 'amount_due'))
     monthly_rows = []
     arrears = Decimal('0')
-    cursor = member.joined.replace(day=1)
+    joined_month = member.joined.replace(day=1)
+    cursor = min([joined_month, *allocated.keys()])
     last_due = min(report_month, member.billing_end) if member.billing_end else report_month
     last = max([last_due, *allocated.keys()])
     while cursor <= last:
+        if cursor < joined_month and cursor not in allocated:
+            cursor = next_month(cursor)
+            continue
         due = rates.get(cursor, RATE) if cursor <= last_due else Decimal('0')
         paid = allocated.get(cursor, Decimal('0'))
         outstanding = max(due - paid, Decimal('0'))
